@@ -297,12 +297,15 @@ Para imagens com tags completamente opacas (ex: baseadas em timestamp ou hash), 
     "pinDigests": false
   },
   "recreateClosed": true,
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
   "packageRules": [
     {
       "description": "ACR imagens pai — patch e minor: automerge se CI aprovado",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["myacr.azurecr.io/.*"],
       "matchUpdateTypes": ["patch", "minor"],
+      "versioning": "loose",
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true,
@@ -313,6 +316,7 @@ Para imagens com tags completamente opacas (ex: baseadas em timestamp ou hash), 
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["myacr.azurecr.io/.*"],
       "matchUpdateTypes": ["major"],
+      "versioning": "loose",
       "automerge": false,
       "dependencyDashboardApproval": true,
       "addLabels": ["docker", "major-update", "breaking-change"]
@@ -321,11 +325,69 @@ Para imagens com tags completamente opacas (ex: baseadas em timestamp ou hash), 
 }
 ```
 
-> **Pré-requisito para automerge nas filhas:** O branch protection do GitHub deve estar configurado com status checks obrigatórios (`image-build`, `image-scan`). Sem isso, o automerge pode mergear uma PR com CI falhando.
+**Por que `prConcurrentLimit` e `prHourlyLimit` estão aqui e não no `base-images`?**
 
-### 6.3 Preset compartilhado (recomendado)
+Os repos de dev são o ponto de amplificação do modelo. Quando uma imagem pai é mergeada e publicada no ACR, o Renovate detecta a nova tag e dispara PRs em **todos os repos filhos ao mesmo tempo**. Sem limites, uma única atualização de imagem pai pode gerar dezenas de PRs simultâneos, saturando runners de CI, gerando ruído de notificações para os times e dificultando a triagem de falhas.
 
-Para evitar drift de configuração entre repositórios de desenvolvedores, publique um preset compartilhado em um repositório interno (ex: `platform/renovate-config`) e faça cada repositório de dev estendê-lo:
+O `base-images` não precisa desses limites — ele recebe um PR por atualização de imagem upstream, sem efeito cascata.
+
+| Parâmetro | Valor | Efeito |
+|---|---|---|
+| `prConcurrentLimit` | `5` | Máximo de 5 PRs abertos ao mesmo tempo por repo |
+| `prHourlyLimit` | `2` | Máximo de 2 PRs criados por hora por repo |
+
+Os valores `5` e `2` são um ponto de partida razoável. Ajuste conforme a capacidade do seu CI — times com runners dedicados e rápidos podem subir esses valores sem problema.
+
+> **Pré-requisito para automerge:** O branch protection do GitHub deve ter status checks obrigatórios (`image-build`, `image-scan`). Sem isso, o Renovate pode mergear uma PR com build quebrado.
+
+### 6.3 Preset compartilhado — centralização via `extends`
+
+O Renovate tem um sistema de herança de configuração via presets. Em vez de cada repositório de desenvolvedor manter seu próprio `renovate.json` completo, todos estendem um único arquivo mantido pela equipe de Plataforma. Quando a regra muda, você altera **um arquivo** — na próxima execução do Renovate (ciclo padrão: a cada hora), todos os repos já pegam a mudança sem nenhum PR nos repos de dev.
+
+#### Estrutura do repo centralizador
+
+Crie um repositório dedicado, por exemplo `sua-org/renovate-config`, com a seguinte estrutura:
+
+```
+renovate-config/
+└── presets/
+    └── acr-child-images.json   ← preset das imagens filhas
+```
+
+O arquivo `presets/acr-child-images.json` contém as regras completas que todos os repos filhos devem herdar:
+
+```json
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "packageRules": [
+    {
+      "description": "ACR imagens pai — patch e minor: automerge se CI aprovado",
+      "matchDatasources": ["docker"],
+      "matchPackagePatterns": ["myacr.azurecr.io/.*"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "versioning": "loose",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "addLabels": ["docker", "base-image-update"]
+    },
+    {
+      "description": "ACR imagens pai — major: bloqueado até aprovação manual",
+      "matchDatasources": ["docker"],
+      "matchPackagePatterns": ["myacr.azurecr.io/.*"],
+      "matchUpdateTypes": ["major"],
+      "versioning": "loose",
+      "automerge": false,
+      "dependencyDashboardApproval": true,
+      "addLabels": ["docker", "major-update", "breaking-change"]
+    }
+  ]
+}
+```
+
+#### `renovate.json` mínimo em cada repo de dev
+
+Com o preset centralizado, cada repositório de desenvolvedor precisa apenas de:
 
 ```json
 {
@@ -336,7 +398,55 @@ Para evitar drift de configuração entre repositórios de desenvolvedores, publ
 }
 ```
 
-Isso permite que a equipe de Plataforma atualize as regras do ACR centralmente sem precisar alterar cada repositório de desenvolvedor.
+O Renovate busca e interpreta o preset remoto automaticamente antes de processar qualquer regra local.
+
+#### Sintaxe do `extends`
+
+```
+"github>org/repo//caminho/para/arquivo"
+          │         │
+          │         └── caminho dentro do repo, sem extensão .json
+          └── org/repo no GitHub
+```
+
+Para apontar para o arquivo raiz do repo (`renovate.json` ou `default.json`) sem especificar caminho:
+
+```json
+"github>sua-org/renovate-config"
+```
+
+#### Ordem de precedência
+
+O Renovate aplica as configurações na ordem em que aparecem no array `extends`, da esquerda para a direita, e regras locais do `renovate.json` sempre sobrescrevem o preset. Isso permite que um repo de dev sobrescreva pontualmente uma regra específica sem quebrar o restante:
+
+```json
+{
+  "extends": [
+    "config:base",
+    "github>sua-org/renovate-config//presets/acr-child-images"
+  ],
+  "packageRules": [
+    {
+      "description": "Override local: desabilita automerge para esta imagem específica",
+      "matchPackageNames": ["myacr.azurecr.io/base/ubi8-legacy"],
+      "automerge": false
+    }
+  ]
+}
+```
+
+#### Por que isso importa operacionalmente
+
+Sem preset centralizado, qualquer mudança de governança — adicionar um label, ajustar `prConcurrentLimit`, adicionar uma nova regra de imagem — exige um PR em cada repositório de desenvolvedor. Com o preset:
+
+| Cenário | Sem preset | Com preset |
+|---|---|---|
+| Adicionar label em todas as PRs de patch | PR em cada repo de dev | 1 commit no `renovate-config` |
+| Ajustar limite de PRs simultâneos | PR em cada repo de dev | 1 commit no `renovate-config` |
+| Onboarding de novo repo de dev | `renovate.json` completo | 3 linhas de `extends` |
+| Auditoria de configuração vigente | Comparar N arquivos | 1 arquivo de referência |
+
+> **Pré-requisito:** O GitHub App do Renovate instalado na organização precisa ter acesso de leitura ao repositório `renovate-config`. Se o repo for privado, verifique as permissões do app antes de referenciar o preset.
 
 ---
 

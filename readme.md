@@ -244,6 +244,7 @@ myacr.azurecr.io/base/nginx126:1.26.2-3
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["registry.redhat.io/.*"],
       "matchUpdateTypes": ["patch", "minor"],
+      "versioning": "loose",
       "automerge": false,
       "addLabels": ["docker", "redhat", "security"]
     },
@@ -252,6 +253,7 @@ myacr.azurecr.io/base/nginx126:1.26.2-3
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["registry.redhat.io/.*"],
       "matchUpdateTypes": ["major"],
+      "versioning": "loose",
       "automerge": false,
       "dependencyDashboardApproval": true,
       "addLabels": ["docker", "redhat", "major-update", "breaking-change"]
@@ -259,6 +261,28 @@ myacr.azurecr.io/base/nginx126:1.26.2-3
   ]
 }
 ```
+
+### 6.1.1 Por que `versioning: "loose"` para imagens Red Hat
+
+O Renovate usa por padrão o versioning `docker`, que faz uma comparação lexicográfica básica entre tags. O problema é que as tags da Red Hat não seguem semver estrito:
+
+```
+ubi8:8.9-1105                        → formato: major.minor-build
+ubi8:8.10-1132                       → idem
+ubi8/openjdk-21:1.20-2.1726696548    → timestamp no build
+```
+
+Sem `versioning: "loose"`, o Renovate pode classificar incorretamente o tipo de atualização — por exemplo, interpretar `8.9-1105 → 8.10-1132` como major em vez de minor, ou ignorar o componente de build completamente. Isso faria com que as regras de `matchUpdateTypes` não se aplicassem ao tipo correto, quebrando a governança de patch vs minor vs major.
+
+O `loose` é um semver permissivo que aceita o formato `major.minor-build` e mapeia corretamente:
+
+| Segmento | Exemplo | Classificação |
+|---|---|---|
+| Primeiro número | `8` → `9` | major |
+| Segundo número | `8.9` → `8.10` | minor |
+| Sufixo de build | `8.9-1105` → `8.9-1132` | patch |
+
+Para imagens com tags completamente opacas (ex: baseadas em timestamp ou hash), o `loose` ainda pode não ser suficiente — nesses casos use `versioning: "regex"` com um padrão customizado que mapeie explicitamente os segmentos da tag.
 
 ### 6.2 Repositórios dos desenvolvedores — `renovate.json`
 

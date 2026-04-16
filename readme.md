@@ -1,218 +1,238 @@
-# Renovate Bot — Container Image Governance
+# Renovate Bot — Governança de Imagens de Container
 
-> **Scope:** This document defines the governance model for container image updates managed by Renovate Bot across parent (`base-images`) and child (developer) repositories, with a focus on preventing image incompatibilities in OpenShift/Kubernetes environments.
-
----
-
-## Table of Contents
-
-1. [Overview](#1-overview)
-2. [Definitions](#2-definitions)
-3. [Image Hierarchy](#3-image-hierarchy)
-4. [Update Classification](#4-update-classification)
-5. [Core Governance Rules](#5-core-governance-rules)
-6. [Renovate Configuration](#6-renovate-configuration)
-7. [Approval Workflow](#7-approval-workflow)
-8. [Compatibility Contract](#8-compatibility-contract)
-9. [Validation Gates](#9-validation-gates)
-10. [Incident Response](#10-incident-response)
-11. [Roles and Responsibilities](#11-roles-and-responsibilities)
-12. [FAQ](#12-faq)
+> **Escopo:** Este documento define o modelo de governança para atualizações de imagens de container gerenciadas pelo Renovate Bot nos repositórios pai (`base-images`) e filhos (repositórios de desenvolvedores), com foco na prevenção de incompatibilidades de imagens em ambientes OpenShift/Kubernetes.
 
 ---
 
-## 1. Overview
+## Índice
 
-The company operates a two-tier container image model:
-
-- **Parent images** are maintained in the `base-images` repository. They are built directly from Red Hat's official registry (`registry.redhat.io`) and pushed to the internal Azure Container Registry (ACR).
-- **Child images** are maintained in individual developer repositories. Their `Dockerfile` `FROM` directive points to a parent image in ACR.
-
-Renovate Bot automates dependency updates at both tiers. Without governance, an uncontrolled update at the parent tier can silently break dozens of child images simultaneously — or introduce a major OS generation change (e.g. UBI 8 → UBI 9) without any human decision.
-
-This document establishes the rules, configurations, workflows, and responsibilities that prevent that from happening.
+1. [Visão Geral](#1-visão-geral)
+2. [Definições](#2-definições)
+3. [Hierarquia de Imagens](#3-hierarquia-de-imagens)
+4. [Classificação de Atualizações](#4-classificação-de-atualizações)
+5. [Regras de Governança](#5-regras-de-governança)
+6. [Configuração do Renovate](#6-configuração-do-renovate)
+7. [Fluxo de Aprovação](#7-fluxo-de-aprovação)
+8. [Contrato de Compatibilidade](#8-contrato-de-compatibilidade)
+9. [Gates de Validação](#9-gates-de-validação)
+10. [Resposta a Incidentes](#10-resposta-a-incidentes)
+11. [Papéis e Responsabilidades](#11-papéis-e-responsabilidades)
+12. [Perguntas Frequentes](#12-perguntas-frequentes)
 
 ---
 
-## 2. Definitions
+## 1. Visão Geral
 
-| Term | Definition |
+A empresa opera um modelo de imagens de container em dois níveis:
+
+- **Imagens pai** são mantidas no repositório `base-images`. Elas são construídas diretamente a partir do registry oficial da Red Hat (`registry.redhat.io`) e publicadas no Azure Container Registry (ACR) interno.
+- **Imagens filhas** são mantidas nos repositórios individuais dos desenvolvedores. A diretiva `FROM` do `Dockerfile` aponta para uma imagem pai no ACR.
+
+O Renovate Bot automatiza as atualizações de dependências em ambos os níveis. Sem governança, uma atualização não controlada no nível pai pode quebrar silenciosamente dezenas de imagens filhas simultaneamente — ou introduzir uma mudança de geração de SO (ex: UBI 8 → UBI 9) sem nenhuma decisão humana.
+
+Este documento estabelece as regras, configurações, fluxos e responsabilidades para prevenir que isso aconteça.
+
+---
+
+## 2. Definições
+
+| Termo | Definição |
 |---|---|
-| **Parent image** | A base image built in the `base-images` repo, sourced from `registry.redhat.io`, published to ACR. |
-| **Child image** | An application image built in a developer repo whose `FROM` references a parent image in ACR. |
-| **Digest pin** | Locking an image to its exact `sha256` hash: `image:tag@sha256:abc…`. Guarantees byte-for-byte reproducibility regardless of tag mutations. |
-| **Tag-only reference** | Referencing an image by tag only: `image:tag`. The underlying content can change without the tag changing. |
-| **Major update** | Change in the first version segment: `ubi8 → ubi9`, `nginx-118 → nginx-126`. High risk — new OS or runtime generation. |
-| **Minor update** | Change in the second version segment: `8.9 → 8.10`. Medium risk — new packages, potential behaviour changes. |
-| **Patch update** | Change in the third segment or a security rebuild with the same tag: `8.9-110 → 8.9-115`. Low risk — CVE fixes, bug fixes. |
-| **Dependency Dashboard** | A GitHub Issue created and maintained by Renovate listing all pending and blocked updates. Major updates require a checkbox to be ticked here before the PR is unblocked. |
-| **Image drift** | The state where different environments or replicas run different image content despite referencing the same tag, due to tag mutation. |
+| **Imagem pai** | Imagem base construída no repositório `base-images`, originada do `registry.redhat.io` e publicada no ACR. |
+| **Imagem filha** | Imagem de aplicação construída em um repositório de desenvolvedor cujo `FROM` referencia uma imagem pai no ACR. |
+| **Digest pin** | Bloqueio de uma imagem ao seu hash `sha256` exato: `image:tag@sha256:abc…`. Garante reprodutibilidade byte a byte, independentemente de mutações de tag. |
+| **Referência por tag** | Referenciar uma imagem apenas pela tag: `image:tag`. O conteúdo subjacente pode mudar sem que a tag mude. |
+| **Atualização major** | Mudança no primeiro segmento de versão: `ubi8 → ubi9`, `nginx-118 → nginx-126`. Alto risco — nova geração de SO ou runtime. |
+| **Atualização minor** | Mudança no segundo segmento de versão: `8.9 → 8.10`. Risco médio — novos pacotes, possíveis mudanças de comportamento. |
+| **Atualização patch** | Mudança no terceiro segmento ou rebuild de segurança com a mesma tag: `8.9-110 → 8.9-115`. Baixo risco — correções de CVE e bugs. |
+| **Dependency Dashboard** | Issue do GitHub criada e mantida pelo Renovate listando todas as atualizações pendentes e bloqueadas. Atualizações major exigem que uma checkbox seja marcada aqui antes do PR ser desbloqueado. |
+| **Image drift** | Estado em que diferentes ambientes ou réplicas executam conteúdo de imagem diferente apesar de referenciar a mesma tag, devido a mutação de tag. |
 
 ---
 
-## 3. Image Hierarchy
+## 3. Hierarquia de Imagens
 
 ```
 registry.redhat.io
         │
-        │  Renovate watches here
-        │  Opens PR with: image:tag@sha256:…
+        │  Renovate monitora aqui
+        │  Abre PR com: image:tag@sha256:…
         │
         ▼
   ┌─────────────────────────┐
-  │   base-images (GitHub)  │   ← parent images
-  │   Dockerfile FROM pinned│
-  │   to sha256 digest      │
+  │   base-images (GitHub)  │   ← imagens pai
+  │   Dockerfile FROM       │
+  │   fixado ao digest sha256│
   └────────────┬────────────┘
                │
-               │  CI pipeline: build + docker push
+               │  Pipeline CI: build + docker push
                ▼
   ┌─────────────────────────┐
   │  Azure Container        │
-  │  Registry (ACR)         │   ← central image store
+  │  Registry (ACR)         │   ← repositório central de imagens
   └────────────┬────────────┘
                │
-               │  Renovate watches here
-               │  Opens PR with: image:tag (no sha)
+               │  Renovate monitora aqui
+               │  Abre PR com: image:tag (sem sha)
                │
                ▼
   ┌─────────────────────────┐
-  │  Developer repos        │   ← child images
-  │  (GitHub)               │
-  │  Dockerfile FROM tag    │
-  │  only, no digest        │
+  │  Repositórios dos       │   ← imagens filhas
+  │  desenvolvedores        │
+  │  Dockerfile FROM apenas │
+  │  por tag, sem digest     │
   └────────────┬────────────┘
                │
-               │  CI pipeline: build + docker push
+               │  Pipeline CI: build + docker push
                ▼
   ┌─────────────────────────┐
-  │  ACR                    │   ← child images published
+  │  ACR                    │   ← imagens filhas publicadas
   └────────────┬────────────┘
                │
                ▼
-  OpenShift / Kubernetes workloads
+  Workloads OpenShift / Kubernetes
 ```
 
-### Why parent images use sha256 and child images use tag only
+### Por que imagens pai usam sha256 e imagens filhas usam apenas tag
 
-**Parent images** consume external content from Red Hat. A tag like `ubi8:8.9` can be silently rebuilt by Red Hat (e.g. a security patch is applied and the tag is moved). Without a digest pin, two builds of your parent image on different days could produce different results using the exact same `FROM` line — this is image drift. Pinning to `sha256` means Renovate will only open a PR when Red Hat publishes a new digest, making every upstream change explicit and auditable.
+**Imagens pai** consomem conteúdo externo da Red Hat. Uma tag como `ubi8:8.9` pode ser silenciosamente reconstruída pela Red Hat (ex: um patch de segurança é aplicado e a tag é movida). Sem digest pin, dois builds da imagem pai em dias diferentes poderiam produzir resultados diferentes usando exatamente o mesmo `FROM` — isso é image drift. Fixar ao `sha256` significa que o Renovate só abrirá um PR quando a Red Hat publicar um novo digest, tornando cada mudança upstream explícita e auditável.
 
-**Child images** reference parent images stored in ACR, which is under internal control. The tag is only moved when our own CI pipeline explicitly pushes a new build after a reviewed and merged PR. There is no silent mutation risk. Digest-pinning child images to ACR would actually break the propagation chain: after a parent image is rebuilt and pushed to ACR, child repos would never receive the update because Renovate would see the digest has changed but the tag hasn't, and skip creating a PR.
+**Imagens filhas** referenciam imagens pai armazenadas no ACR, que está sob controle interno. A tag só é movida quando o nosso próprio pipeline de CI faz push explícito de um novo build após um PR revisado e mergeado. Não há risco de mutação silenciosa. Fazer digest pin das imagens filhas no ACR quebraria a cadeia de propagação: após uma imagem pai ser reconstruída e publicada no ACR, os repositórios filhos nunca receberiam a atualização.
 
 ---
 
-## 4. Update Classification
+## 4. Classificação de Atualizações
 
-### 4.1 Parent images (source: `registry.redhat.io`)
+### 4.1 Imagens pai (origem: `registry.redhat.io`)
 
-| Update type | Example | Risk level | Default behaviour |
+O gate de qualidade principal acontece **aqui**. Toda atualização de imagem pai exige revisão humana porque ela é a fundação de todas as imagens da empresa. Mesmo um patch pode atualizar `glibc` ou `openssl` e quebrar uma aplicação que depende de uma versão específica dessas bibliotecas.
+
+| Tipo | Exemplo | Risco | Comportamento |
 |---|---|---|---|
-| Patch | `ubi8:8.9-110 → 8.9-115` | 🟢 Low | PR opened, no extra gate |
-| Minor | `ubi8:8.9 → 8.10` | 🟡 Medium | PR opened, no extra gate |
-| Major | `ubi8 → ubi9` | 🔴 High | PR opened, **blocked until Dependency Dashboard approval** |
-| Major | `nginx-118 → nginx-126` | 🔴 High | PR opened, **blocked until Dependency Dashboard approval** |
+| Patch | `ubi8:8.9-110 → 8.9-115` | 🟢 Baixo | PR aberto — **revisão humana obrigatória** |
+| Minor | `ubi8:8.9 → 8.10` | 🟡 Médio | PR aberto — **revisão humana obrigatória** |
+| **Major** | `ubi8 → ubi9` | 🔴 Alto | PR aberto — **bloqueado até aprovação no Dependency Dashboard** |
+| **Major** | `nginx-118 → nginx-126` | 🔴 Alto | PR aberto — **bloqueado até aprovação no Dependency Dashboard** |
 
-### 4.2 Child images (source: ACR)
+> **Regra:** Não há automerge em nenhum tipo de atualização de imagem pai. O custo de uma imagem ruim chegando à produção é maior do que o custo de uma revisão humana.
 
-| Update type | Example | Risk level | Default behaviour |
+### 4.2 Imagens filhas (origem: ACR)
+
+O conteúdo já passou pelo gate de qualidade no nível pai. Patch e minor vindos do ACR podem ter automerge habilitado condicionado à aprovação do CI, pois a decisão de qualidade já foi tomada upstream.
+
+| Tipo | Exemplo | Risco | Comportamento |
 |---|---|---|---|
-| Patch / Minor | `base-img:v1.2 → v1.3` | 🟢 Low–Medium | PR opened, no extra gate |
-| Major | `ubi8-base:1.x → ubi9-base:2.x` | 🔴 High | PR opened, **blocked until Dependency Dashboard approval** |
+| Patch | `base-img:v1.2-3 → v1.2-4` | 🟢 Baixo | ✅ **Automerge se CI aprovado** |
+| Minor | `base-img:v1.2 → v1.3` | 🟢 Baixo–Médio | ✅ **Automerge se CI aprovado** |
+| **Major** | `ubi8-base:1.x → ubi9-base:2.x` | 🔴 Alto | PR aberto — **bloqueado até aprovação no Dependency Dashboard** |
 
-### 4.3 The two-gate rule for major updates
+> **Justificativa do automerge nas filhas:** A imagem pai no ACR só existe porque passou por revisão humana no `base-images`. Fazer revisão manual novamente em cada repositório filho para a mesma atualização cria atrito sem adicionar segurança real — apenas atrasa a chegada de patches de segurança às aplicações.
 
-A major update at the parent tier creates a cascade of blocking PRs. The sequence is always:
+### 4.3 A regra dos dois gates para atualizações major
+
+Uma atualização major no nível pai cria uma cascata de PRs bloqueados. A sequência é sempre:
 
 ```
-1. Renovate opens a BLOCKED PR in base-images  (gate 1)
-2. Platform team approves on Dependency Dashboard
-3. PR is reviewed, merged, CI builds new parent image, pushes to ACR
-4. Renovate detects new tag in ACR, opens BLOCKED PRs in all child repos  (gate 2)
-5. Each dev team approves their own child repo PR on Dependency Dashboard
-6. Each child PR is reviewed, merged, CI builds new child image
+1. Renovate abre PR BLOQUEADO em base-images              (gate 1 — equipe de Plataforma)
+2. Equipe de Plataforma aprova no Dependency Dashboard
+3. PR é revisado, mergeado, CI constrói nova imagem pai e faz push no ACR
+4. Renovate detecta nova tag no ACR, abre PRs BLOQUEADOS
+   em todos os repositórios filhos                        (gate 2 — cada equipe de dev)
+5. Cada equipe de dev aprova seu próprio PR no Dependency Dashboard
+6. Cada PR filho é revisado, mergeado, CI constrói nova imagem filha
 ```
 
-This means a single `ubi8 → ubi9` change requires explicit sign-off at the parent level **and** at every individual child repo. No child image runs a new OS generation silently.
+Isso significa que uma mudança `ubi8 → ubi9` exige sign-off explícito no nível pai **e** em cada repositório filho. Nenhuma imagem filha executa uma nova geração de SO silenciosamente.
 
 ---
 
-## 5. Core Governance Rules
+## 5. Regras de Governança
 
-### Rule 1 — No automerge at any tier
+### Regra 1 — Sem automerge em imagens pai
 
-No image update, regardless of type or tier, shall be automatically merged. Every PR requires a human to review and merge it. This is non-negotiable for base images.
+Nenhuma atualização de imagem pai, independentemente do tipo, será mergeada automaticamente. Toda PR exige revisão humana. Isso é inegociável para imagens base.
 
 ```json
-"automerge": false
+"automerge": false  // aplicado a todas as regras de imagens pai
 ```
 
-### Rule 2 — Parent images must always be digest-pinned
+### Regra 2 — Automerge permitido em imagens filhas para patch e minor
 
-Every `FROM` directive in the `base-images` repository must include the `sha256` digest. A CI validation gate must reject any PR that introduces or modifies a `FROM` line without a digest.
+Imagens filhas podem ter automerge habilitado para patch e minor, desde que o CI passe. O gate de qualidade já aconteceu no nível pai.
+
+```json
+"automerge": true,
+"automergeType": "pr",
+"platformAutomerge": true  // usa o automerge nativo do GitHub (requer branch protection)
+```
+
+### Regra 3 — Imagens pai devem sempre ter digest pin
+
+Todo `FROM` no repositório `base-images` deve incluir o digest `sha256`. Um gate de CI deve rejeitar qualquer PR que introduza ou modifique um `FROM` sem digest.
 
 ```dockerfile
-# ✅ Correct — digest-pinned
+# ✅ Correto — com digest pin
 FROM registry.redhat.io/ubi8/ubi:8.10-1132@sha256:3d6b4e8c...
 
-# ❌ Rejected by CI gate — tag only
+# ❌ Rejeitado pelo gate de CI — apenas tag
 FROM registry.redhat.io/ubi8/ubi:8.10
 ```
 
-### Rule 3 — Child images must NOT use digest pins
+### Regra 4 — Imagens filhas NÃO devem usar digest pin
 
-Child image `FROM` directives must reference ACR images by tag only. Digest-pinning at the child level would break the automated propagation chain from parent to child.
+Os `FROM` das imagens filhas devem referenciar imagens do ACR apenas por tag. Fazer digest pin no nível filho quebraria a cadeia de propagação automática.
 
 ```dockerfile
-# ✅ Correct — tag only
+# ✅ Correto — apenas tag
 FROM myacr.azurecr.io/base/ubi8:2.1
 
-# ❌ Incorrect — breaks propagation
+# ❌ Incorreto — quebra a propagação
 FROM myacr.azurecr.io/base/ubi8:2.1@sha256:abc123...
 ```
 
-### Rule 4 — Major updates require explicit approval
+### Regra 5 — Atualizações major exigem aprovação explícita
 
-Any update classified as `major` must have `dependencyDashboardApproval: true`. The PR will be created but remain in a blocked state until a member of the Platform or Architecture team manually ticks the checkbox in the Renovate Dependency Dashboard issue.
+Qualquer atualização classificada como `major` deve ter `dependencyDashboardApproval: true`. O PR será criado, mas permanecerá bloqueado até que um membro da equipe de Plataforma ou Arquitetura marque manualmente a checkbox no Dependency Dashboard.
 
-### Rule 5 — PRs must always be recreated
+### Regra 6 — PRs devem sempre ser recriados
 
-Renovate must be configured to recreate PRs even when they are closed without merging. This ensures updates do not disappear silently from the queue.
+O Renovate deve ser configurado para recriar PRs mesmo quando forem fechados sem merge. Isso garante que atualizações não desapareçam silenciosamente da fila.
 
 ```json
 "recreateClosed": true
 ```
 
-### Rule 6 — All image update PRs must carry labels
+### Regra 7 — Todas as PRs de atualização de imagem devem ter labels
 
-Labels are mandatory on all image update PRs to enable filtering, reporting, and alerting in GitHub. At minimum:
+Labels são obrigatórias em todas as PRs de atualização de imagem para facilitar filtragem, relatórios e alertas no GitHub:
 
-- `docker` — all image updates
-- `redhat` — updates from `registry.redhat.io`
-- `security` — patch updates (likely CVE-driven)
-- `major-update` + `breaking-change` — major version bumps
+- `docker` — todas as atualizações de imagem
+- `redhat` — atualizações de `registry.redhat.io`
+- `security` — atualizações patch (provavelmente relacionadas a CVE)
+- `major-update` + `breaking-change` — bumps de versão major
 
-### Rule 7 — Parent image tags follow a defined naming convention
+### Regra 8 — Tags de imagens pai seguem convenção de nomenclatura semver
 
-Tags pushed to ACR from the `base-images` pipeline must follow semantic versioning: `<major>.<minor>.<patch>-<build>`. This enables Renovate to correctly classify updates in child repos.
+Tags publicadas no ACR pelo pipeline do `base-images` devem seguir versionamento semântico: `<major>.<minor>.<patch>-<build>`. Isso permite que o Renovate classifique corretamente as atualizações nos repositórios filhos.
 
 ```
-# Examples
+# Exemplos
 myacr.azurecr.io/base/ubi8:8.10.0-1
 myacr.azurecr.io/base/nginx126:1.26.2-3
 ```
 
 ---
 
-## 6. Renovate Configuration
+## 6. Configuração do Renovate
 
-### 6.1 `base-images` repo — `renovate.json`
+### 6.1 Repositório `base-images` — `renovate.json`
 
 ```json
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:base"],
   "dependencyDashboard": true,
-  "dependencyDashboardTitle": "Renovate — Base Images Dependency Dashboard",
+  "dependencyDashboardTitle": "Renovate — Dependency Dashboard (base-images)",
   "docker": {
     "enabled": true,
     "pinDigests": true
@@ -220,7 +240,7 @@ myacr.azurecr.io/base/nginx126:1.26.2-3
   "recreateClosed": true,
   "packageRules": [
     {
-      "description": "Red Hat — patch and minor: open PR, no extra gate",
+      "description": "Red Hat — patch e minor: abre PR, revisão humana obrigatória, sem automerge",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["registry.redhat.io/.*"],
       "matchUpdateTypes": ["patch", "minor"],
@@ -228,7 +248,7 @@ myacr.azurecr.io/base/nginx126:1.26.2-3
       "addLabels": ["docker", "redhat", "security"]
     },
     {
-      "description": "Red Hat — major: blocked until manual approval",
+      "description": "Red Hat — major: bloqueado até aprovação manual",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["registry.redhat.io/.*"],
       "matchUpdateTypes": ["major"],
@@ -240,16 +260,14 @@ myacr.azurecr.io/base/nginx126:1.26.2-3
 }
 ```
 
-### 6.2 Developer repos — `renovate.json`
-
-This config should be standardised across all developer repos, ideally enforced via a shared Renovate preset hosted in a central repo.
+### 6.2 Repositórios dos desenvolvedores — `renovate.json`
 
 ```json
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:base"],
   "dependencyDashboard": true,
-  "dependencyDashboardTitle": "Renovate — App Image Dependency Dashboard",
+  "dependencyDashboardTitle": "Renovate — Dependency Dashboard",
   "docker": {
     "enabled": true,
     "pinDigests": false
@@ -257,15 +275,17 @@ This config should be standardised across all developer repos, ideally enforced 
   "recreateClosed": true,
   "packageRules": [
     {
-      "description": "ACR parent images — patch and minor: open PR normally",
+      "description": "ACR imagens pai — patch e minor: automerge se CI aprovado",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["myacr.azurecr.io/.*"],
       "matchUpdateTypes": ["patch", "minor"],
-      "automerge": false,
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
       "addLabels": ["docker", "base-image-update"]
     },
     {
-      "description": "ACR parent images — major: blocked until manual approval",
+      "description": "ACR imagens pai — major: bloqueado até aprovação manual",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["myacr.azurecr.io/.*"],
       "matchUpdateTypes": ["major"],
@@ -277,214 +297,242 @@ This config should be standardised across all developer repos, ideally enforced 
 }
 ```
 
-### 6.3 Shared preset (recommended)
+> **Pré-requisito para automerge nas filhas:** O branch protection do GitHub deve estar configurado com status checks obrigatórios (`image-build`, `image-scan`). Sem isso, o automerge pode mergear uma PR com CI falhando.
 
-To avoid config drift across developer repos, publish a shared preset in an internal repo (e.g. `platform/renovate-config`) and have each dev repo extend it:
+### 6.3 Preset compartilhado (recomendado)
+
+Para evitar drift de configuração entre repositórios de desenvolvedores, publique um preset compartilhado em um repositório interno (ex: `platform/renovate-config`) e faça cada repositório de dev estendê-lo:
 
 ```json
 {
   "extends": [
     "config:base",
-    "github>your-org/renovate-config//presets/acr-child-images"
+    "github>sua-org/renovate-config//presets/acr-child-images"
   ]
 }
 ```
 
-This allows the Platform team to update ACR rules centrally without touching every developer repo.
+Isso permite que a equipe de Plataforma atualize as regras do ACR centralmente sem precisar alterar cada repositório de desenvolvedor.
 
 ---
 
-## 7. Approval Workflow
+## 7. Fluxo de Aprovação
 
-### 7.1 Patch / Minor update
-
-```
-Renovate detects new version
-          │
-          ▼
-  PR opened automatically
-  (labelled: docker, redhat/base-image-update, security)
-          │
-          ▼
-  Assigned team reviews PR
-  - Check changelog / Red Hat errata
-  - Verify CI passes
-          │
-          ▼
-       Merge PR
-          │
-          ▼
-  CI builds image, pushes to ACR
-  (parent tier only — child PRs open next)
-```
-
-### 7.2 Major update
+### 7.1 Patch / Minor — imagem pai (`base-images`)
 
 ```
-Renovate detects major version change
+Renovate detecta nova versão no registry.redhat.io
           │
           ▼
-  PR opened — BLOCKED
-  (labelled: docker, major-update, breaking-change)
-  PR description includes:
-  - Current version
-  - Target version
-  - Link to Red Hat release notes
+  PR aberto automaticamente
+  (labels: docker, redhat, security)
           │
           ▼
-  Platform/Arch team is notified
-  (via GitHub label subscription or Slack integration)
+  Equipe de Plataforma revisa o PR
+  - Verifica errata / changelog da Red Hat
+  - Verifica se CI passou
+  - Avalia impacto potencial nas imagens filhas
           │
           ▼
-  Compatibility assessment:
-  - Is the new image supported by our OpenShift version?
-  - Are all dependent RPMs/runtimes available in the new generation?
-  - Which child repos consume this parent?
-  - What is the rollout plan?
+       Mergea o PR
+          │
+          ▼
+  CI constrói imagem pai, faz push no ACR com nova tag
+          │
+          ▼
+  Renovate detecta nova tag no ACR
+  Abre PRs nos repositórios filhos (automerge se CI verde)
+```
+
+### 7.2 Patch / Minor — imagem filha (repositórios de dev)
+
+```
+Renovate detecta nova tag no ACR
+          │
+          ▼
+  PR aberto automaticamente
+  (labels: docker, base-image-update)
+          │
+          ▼
+  CI executa (build + scan)
           │
     ┌─────┴─────┐
-  Approved     Rejected
+  CI verde    CI vermelho
     │               │
     ▼               ▼
-  Tick checkbox   Close PR
-  on Dependency   Add comment explaining
-  Dashboard       reason for rejection
+  Automerge    PR permanece aberto
+  automático   Equipe de dev investiga
+               e corrige antes de mergear
+```
+
+### 7.3 Major — qualquer nível
+
+```
+Renovate detecta mudança de versão major
+          │
+          ▼
+  PR aberto — BLOQUEADO
+  (labels: docker, major-update, breaking-change)
+  Descrição do PR inclui:
+  - Versão atual e versão alvo
+  - Link para release notes da Red Hat
+  - Lista de repositórios filhos afetados (se nível pai)
+          │
+          ▼
+  Equipe de Plataforma / Arquitetura é notificada
+  (via subscription de label no GitHub ou integração com Slack)
+          │
+          ▼
+  Avaliação de compatibilidade:
+  - Nova imagem é suportada pela versão atual do OpenShift?
+  - Todas as dependências (RPMs, runtimes, libs) são compatíveis?
+  - Quais repositórios filhos consomem este pai?
+  - Qual é o plano de rollout?
+          │
+    ┌─────┴──────┐
+  Aprovado    Rejeitado
+    │               │
+    ▼               ▼
+  Marca checkbox  Fecha o PR
+  no Dependency   Adiciona comentário
+  Dashboard       explicando a rejeição
     │
     ▼
-  PR unblocked
-  Team reviews and merges
+  PR desbloqueado
+  Equipe revisa e mergea
     │
     ▼
-  CI builds parent, pushes to ACR
+  CI constrói imagem pai, faz push no ACR
     │
     ▼
-  Renovate opens BLOCKED PRs in all child repos
+  Renovate abre PRs BLOQUEADOS em todos os repositórios filhos
     │
     ▼
-  Each dev team repeats assessment for their app
-  and approves/rejects independently
+  Cada equipe de dev repete a avaliação
+  e aprova/rejeita independentemente
 ```
 
 ---
 
-## 8. Compatibility Contract
+## 8. Contrato de Compatibilidade
 
-The following contract must be respected between parent and child image maintainers.
+### 8.1 O que a equipe de Plataforma garante
 
-### 8.1 What the Platform team guarantees
+Ao publicar uma nova imagem pai no ACR, a equipe de Plataforma garante que:
 
-When publishing a new parent image to ACR, the Platform team guarantees that:
+- A imagem passou por todos os scans de segurança internos.
+- A imagem é suportada pela versão atual do OpenShift em produção.
+- A tag segue a convenção de nomenclatura acordada (`major.minor.patch-build`).
+- Release notes ou entrada de changelog está linkada na descrição do PR.
+- Para atualizações major: pelo menos 30 dias de aviso são dados às equipes de desenvolvedores antes do merge do PR pai.
 
-- The image has passed all internal security scans.
-- The image is supported by the current production OpenShift version.
-- The image tag follows the agreed naming convention (`major.minor.patch-build`).
-- Release notes or a changelog entry is linked in the PR description.
-- For major updates: at least 30 days notice is given to developer teams before the parent PR is merged.
+### 8.2 O que as equipes de desenvolvedores são responsáveis
 
-### 8.2 What developer teams are responsible for
+Quando uma PR do Renovate atualiza o `FROM` de uma imagem filha:
 
-When a Renovate PR updates a child image's `FROM`:
+- A equipe não deve confiar apenas no automerge para atualizações que impactem comportamento crítico da aplicação — o CI deve cobrir esses cenários.
+- A equipe não deve fechar ou dispensar uma PR de major update sem documentar o motivo.
+- A equipe é responsável por testar o comportamento da sua aplicação contra a nova imagem pai quando o CI não cobre todos os casos.
+- A equipe não deve editar manualmente o `FROM` para contornar a tag gerenciada pelo Renovate.
 
-- The team must not merge without verifying that application-level tests pass.
-- The team must not close or dismiss a major-update PR without documenting the reason.
-- The team is responsible for testing their own application behaviour against the new parent image.
-- The team must not manually edit the `FROM` line to bypass the Renovate-managed tag.
+### 8.3 Práticas proibidas
 
-### 8.3 Prohibited practices
-
-| Practice | Risk | Alternative |
+| Prática | Risco | Alternativa |
 |---|---|---|
-| Manually pinning a child `FROM` to a specific sha256 | Breaks update propagation | Use tag only; let Renovate manage updates |
-| Using `latest` tag in any `FROM` | Completely unpredictable | Always use a versioned tag |
-| Merging a Renovate PR without CI passing | Untested image in production | Fix CI before merging |
-| Closing a major-update PR silently | Creates invisible technical debt | Document the rejection with a comment |
-| Running different parent image versions across envs | Image drift, non-reproducible builds | All envs must use the same tag at the same time |
+| Fazer digest pin do `FROM` filho no ACR | Quebra a propagação automática de atualizações | Usar apenas tag; deixar o Renovate gerenciar |
+| Usar tag `latest` em qualquer `FROM` | Completamente imprevisível | Sempre usar tag versionada |
+| Mergear PR do Renovate com CI falhando | Imagem não testada em produção | Corrigir o CI antes de mergear |
+| Fechar PR de major update silenciosamente | Cria dívida técnica invisível | Documentar a rejeição com comentário |
+| Executar versões diferentes da imagem pai entre ambientes | Image drift, builds não reprodutíveis | Todos os ambientes devem usar a mesma tag ao mesmo tempo |
+| Desabilitar o Renovate em um repositório | Patches de segurança nunca chegam à aplicação | Abrir issue documentando motivo e data-alvo de migração |
 
 ---
 
-## 9. Validation Gates
+## 9. Gates de Validação
 
-The following automated checks must be in place to enforce the governance rules above.
+Os seguintes checks automatizados devem estar em vigor para reforçar as regras de governança.
 
-### 9.1 CI gate — Parent images (base-images pipeline)
+### 9.1 Gate de CI — Imagens pai (pipeline do `base-images`)
 
 ```yaml
-# Example: GitHub Actions step
-- name: Validate digest pin in Dockerfile
+# Exemplo: GitHub Actions
+- name: Valida digest pin no Dockerfile
   run: |
     if grep -E "^FROM" Dockerfile | grep -qv "@sha256:"; then
-      echo "ERROR: FROM line is missing sha256 digest pin."
-      echo "All parent image FROM directives must include @sha256:..."
+      echo "ERRO: A linha FROM está sem digest pin sha256."
+      echo "Todos os FROM de imagens pai devem incluir @sha256:..."
       exit 1
     fi
 ```
 
-### 9.2 CI gate — Child images (developer repo pipeline)
+### 9.2 Gate de CI — Imagens filhas (pipeline dos repositórios de dev)
 
 ```yaml
-# Example: GitHub Actions step
-- name: Validate no digest pin in Dockerfile
+# Exemplo: GitHub Actions
+- name: Valida ausência de digest pin no Dockerfile
   run: |
     if grep -E "^FROM.*myacr\.azurecr\.io" Dockerfile | grep -q "@sha256:"; then
-      echo "ERROR: Child image FROM must not include sha256 digest."
-      echo "Use tag only: FROM myacr.azurecr.io/base/ubi8:2.1"
+      echo "ERRO: FROM de imagem filha não deve incluir digest sha256."
+      echo "Use apenas a tag: FROM myacr.azurecr.io/base/ubi8:2.1"
       exit 1
     fi
 ```
 
-### 9.3 CI gate — Tag naming convention (base-images pipeline)
-
-The pipeline must validate that the tag being pushed to ACR matches the required semver format before pushing.
+### 9.3 Gate de CI — Convenção de nomenclatura de tags (pipeline do `base-images`)
 
 ```bash
 TAG="${IMAGE_VERSION}"
 if ! echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$'; then
-  echo "ERROR: Tag '$TAG' does not match required format: major.minor.patch-build"
+  echo "ERRO: Tag '$TAG' não segue o formato obrigatório: major.minor.patch-build"
   exit 1
 fi
 ```
 
-### 9.4 Required status checks on GitHub
+### 9.4 Status checks obrigatórios no GitHub
 
-The following status checks must be set as **required** on the default branch of both `base-images` and all developer repos:
+Os seguintes checks devem ser configurados como **obrigatórios** no branch protection do branch principal de todos os repositórios:
 
-- `validate-dockerfile` — runs the FROM line checks above
-- `image-build` — the image must build successfully
-- `image-scan` — security scan must pass with no critical CVEs
-- `renovate-config-validator` — validates `renovate.json` schema on every PR
+| Check | Descrição |
+|---|---|
+| `validate-dockerfile` | Valida as regras de `FROM` descritas acima |
+| `image-build` | A imagem deve ser construída com sucesso |
+| `image-scan` | Scan de segurança deve passar sem CVEs críticos |
+| `renovate-config-validator` | Valida o schema do `renovate.json` em cada PR |
+
+> **Atenção:** O automerge nas imagens filhas só é seguro se `image-build` e `image-scan` forem status checks obrigatórios. Sem isso, o Renovate pode mergear uma PR com build quebrado.
 
 ---
 
-## 10. Incident Response
+## 10. Resposta a Incidentes
 
-### 10.1 Incompatible image deployed to production
+### 10.1 Imagem incompatível implantada em produção
 
-**Symptoms:** Application crashes, startup errors, missing libraries or RPMs, unexpected behaviour after a `FROM` update.
+**Sintomas:** Crash da aplicação, erros de inicialização, bibliotecas ou RPMs faltando, comportamento inesperado após atualização do `FROM`.
 
-**Immediate response:**
+**Resposta imediata:**
 
-1. Identify the image tag currently running: `oc get pod <pod> -o jsonpath='{.spec.containers[*].image}'`
-2. Roll back the deployment to the previous image tag: `oc rollout undo deployment/<name>`
-3. Open a GitHub Issue in the affected repo tagged `incident` and `image-compatibility`
-4. Notify the Platform team to investigate the parent image
+1. Identificar a tag de imagem em execução: `oc get pod <pod> -o jsonpath='{.spec.containers[*].image}'`
+2. Fazer rollback do deployment para a tag anterior: `oc rollout undo deployment/<nome>`
+3. Abrir uma Issue no GitHub no repositório afetado com labels `incident` e `image-compatibility`
+4. Notificar a equipe de Plataforma para investigar a imagem pai
 
-**Root cause investigation:**
+**Investigação da causa raiz:**
 
-1. Compare the two parent image digests using `skopeo inspect`
-2. Identify which RPMs or libraries changed between builds
-3. Determine if the child image's application dependencies are incompatible with the change
-4. Document findings in the GitHub Issue
+1. Comparar os dois digests de imagem pai usando `skopeo inspect`
+2. Identificar quais RPMs ou bibliotecas mudaram entre os builds
+3. Determinar se as dependências da aplicação na imagem filha são incompatíveis com a mudança
+4. Documentar os achados na Issue do GitHub
 
-**Resolution:**
+**Resolução:**
 
-- If the parent image is at fault: revert the parent PR, rebuild and push previous version to ACR with a new patch tag.
-- If the child image is at fault: update the application to be compatible, then re-merge the child PR.
+- Se a imagem pai for a causa: reverter o PR pai, reconstruir e publicar a versão anterior no ACR com uma nova tag de patch.
+- Se a imagem filha for a causa: atualizar a aplicação para ser compatível, depois re-mergear o PR da filha.
 
-### 10.2 Renovate opens hundreds of PRs simultaneously
+### 10.2 Renovate abre centenas de PRs simultaneamente
 
-This can happen after a long Renovate pause or a major parent image update propagating to many child repos.
+Pode acontecer após uma pausa longa do Renovate ou uma atualização major de imagem pai propagando para muitos repositórios filhos.
 
-**Prevention:** Set `prConcurrentLimit` and `prHourlyLimit` in the shared preset:
+**Prevenção:** Configurar `prConcurrentLimit` e `prHourlyLimit` no preset compartilhado:
 
 ```json
 {
@@ -493,76 +541,76 @@ This can happen after a long Renovate pause or a major parent image update propa
 }
 ```
 
-**If it happens:** Use the Dependency Dashboard to batch-approve or batch-close PRs. Do not merge them all at once — stagger merges to allow CI capacity to absorb the load.
+**Se acontecer:** Usar o Dependency Dashboard para aprovar ou fechar PRs em lote. Não mergear tudo de uma vez — escalonar os merges para que a capacidade do CI absorva a carga.
 
-### 10.3 Renovate stops creating PRs
+### 10.3 Renovate para de criar PRs
 
-**Likely causes:**
-- `renovate.json` has a syntax error — validate with `renovate-config-validator`
-- GitHub App token has expired or lost permissions
-- The Renovate bot has been rate-limited by the GitHub API
+**Causas prováveis:**
+- `renovate.json` tem erro de sintaxe — validar com `renovate-config-validator`
+- Token do GitHub App expirou ou perdeu permissões
+- O bot do Renovate foi limitado por rate limit da API do GitHub
 
-**Check:** Open the Dependency Dashboard issue and look for error messages. Check the Renovate bot logs in your CI runner or Renovate Cloud dashboard.
+**Como verificar:** Abrir a Issue do Dependency Dashboard e procurar mensagens de erro. Verificar os logs do bot do Renovate no seu runner de CI ou no dashboard do Renovate Cloud.
 
 ---
 
-## 11. Roles and Responsibilities
+## 11. Papéis e Responsabilidades
 
-| Role | Responsibilities |
+| Papel | Responsabilidades |
 |---|---|
-| **Platform / Image team** | Maintains `base-images` repo. Reviews and merges all parent image PRs. Owns the CI gates and tag naming convention. Gives 30-day notice before merging major parent updates. |
-| **Developer teams** | Reviews and merges child image PRs in their own repos. Responsible for application-level compatibility testing. Must not bypass Renovate-managed `FROM` lines. |
-| **Architect / Tech Lead** | Approves major updates on the Dependency Dashboard at both parent and child tiers. Owns the compatibility assessment process. Reviews this governance document annually. |
-| **Security team** | Subscribes to `security` label notifications. Verifies that patch updates for CVE fixes are merged within the agreed SLA (see below). |
-| **Renovate admin** | Manages the Renovate GitHub App installation, shared presets, and bot configuration. Responds to Renovate outages or misconfigurations. |
+| **Equipe de Plataforma / Imagens** | Mantém o repositório `base-images`. Revisa e mergea todos os PRs de imagens pai. Possui os gates de CI e a convenção de nomenclatura de tags. Dá aviso de 30 dias antes de mergear atualizações major de imagens pai. |
+| **Equipes de desenvolvedores** | Revisam e mergeam PRs de imagens filhas nos seus próprios repositórios quando o automerge não cobre o caso. Responsáveis por testes de compatibilidade no nível da aplicação. Não devem contornar as linhas `FROM` gerenciadas pelo Renovate. |
+| **Arquiteto / Tech Lead** | Aprova atualizações major no Dependency Dashboard em ambos os níveis. Possui o processo de avaliação de compatibilidade. Revisa este documento de governança anualmente. |
+| **Equipe de Segurança** | Recebe notificações por subscription de label `security`. Verifica que patches de CVE críticos são mergeados dentro do SLA acordado (ver abaixo). |
+| **Administrador do Renovate** | Gerencia a instalação do GitHub App do Renovate, presets compartilhados e configuração do bot. Responde a interrupções ou configurações incorretas do Renovate. |
 
-### 11.1 SLA for merging security patch updates
+### 11.1 SLA para merge de patches de segurança
 
-| Severity | Target merge time |
+| Severidade | Tempo-alvo de merge |
 |---|---|
-| Critical CVE (CVSS ≥ 9.0) | Within 24 hours of PR creation |
-| High CVE (CVSS 7.0–8.9) | Within 72 hours |
-| Medium / Low | Within next scheduled sprint |
+| CVE Crítico (CVSS ≥ 9.0) | Dentro de 24 horas após criação do PR |
+| CVE Alto (CVSS 7.0–8.9) | Dentro de 72 horas |
+| Médio / Baixo | Na próxima sprint agendada |
 
 ---
 
-## 12. FAQ
+## 12. Perguntas Frequentes
 
-**Q: Why does Renovate open a PR even for a patch update? Can't we automerge patches?**
+**P: Por que patch e minor nas imagens pai não têm automerge, mas nas filhas têm?**
 
-A: For container base images, even a patch update can introduce breaking changes — a new glibc version, a changed default config file, a removed binary. Given that parent images underpin all application containers in the company, the cost of a bad patch reaching production outweighs the convenience of automerge. Manual review is mandatory at all levels.
-
----
-
-**Q: A developer wants to pin their child `FROM` to a specific sha256 for extra stability. Why is that not allowed?**
-
-A: Digest-pinning at the child level severs the automated update chain. Renovate would no longer be able to open PRs for that image because the digest would never change from Renovate's perspective (it doesn't know the tag moved). The stability guarantee should come from the parent image governance, not from freezing the child.
+R: O gate de qualidade acontece **uma vez, no nível pai**. Quando a equipe de Plataforma revisa e mergea um patch ou minor em `base-images`, ela está tomando a decisão de que aquela atualização é segura para a empresa. Os repositórios filhos podem confiar nessa decisão — exigir revisão humana novamente em cada filho cria atrito sem adicionar segurança real, e atrasa a chegada de patches de segurança às aplicações. Para imagens pai, no entanto, não há gate upstream — qualquer coisa da Red Hat pode chegar, incluindo mudanças que quebram libs ou RPMs usados pelas nossas imagens.
 
 ---
 
-**Q: What happens if Red Hat pulls or deprecates an image?**
+**P: Um desenvolvedor quer fixar o `FROM` filho a um sha256 específico para maior estabilidade. Por que isso não é permitido?**
 
-A: Renovate will not open a PR because there is no new version. However, the image will continue to build using the last known digest until it is explicitly removed from Red Hat's registry. The Platform team should monitor Red Hat's lifecycle announcements and proactively open a migration PR when an image reaches end-of-life.
-
----
-
-**Q: Can a developer pin a specific parent image version and opt out of Renovate updates for their repo?**
-
-A: No. All developer repos must have Renovate enabled and must not disable or exclude ACR image packages from the scan. Opting out creates invisible dependency debt and means security patches never reach that application. If a developer has a legitimate compatibility reason to stay on a specific parent version, they must open a GitHub Issue documenting the reason and a target date for migration.
+R: O digest pin no nível filho corta a cadeia de atualização automatizada. O Renovate não conseguiria mais abrir PRs para aquela imagem porque o digest nunca mudaria da perspectiva do Renovate (ele não sabe que a tag foi movida). A garantia de estabilidade deve vir da governança da imagem pai, não de congelar a filha.
 
 ---
 
-**Q: How do we handle images that don't follow semver? For example, `ubi8/openjdk-21`.**
+**P: O que acontece se a Red Hat descontinuar uma imagem?**
 
-A: Renovate's `versioning: "loose"` handles non-semver tags by doing a best-effort comparison. For images with opaque tags (e.g. date-based or hash-based), the Platform team must define a custom `versioning` rule in the shared preset and document the expected tag pattern. If versioning cannot be reliably parsed, the image should be excluded from automated updates and managed manually with a documented review cycle.
-
----
-
-**Q: We have a staging environment. Can we automerge there and only require manual approval in production?**
-
-A: Environment-specific automerge is not supported natively by Renovate (it acts on the repo, not on the deployment target). The recommended pattern is to have a separate `staging` branch where patch and minor updates can be merged with lighter review, and only promote to `main` after validation. This is outside Renovate's scope and should be handled by your GitOps / promotion pipeline.
+R: O Renovate não abrirá um PR porque não há nova versão. No entanto, a imagem continuará sendo construída usando o último digest conhecido até que seja explicitamente removida do registry da Red Hat. A equipe de Plataforma deve monitorar os anúncios de ciclo de vida da Red Hat e abrir proativamente um PR de migração quando uma imagem atingir o fim de vida.
 
 ---
 
-*Last updated: April 2026 — Platform Engineering team*
-*Review cycle: Annual or after any major Renovate version upgrade*
+**P: Um desenvolvedor pode fixar uma versão específica da imagem pai e optar por não receber as atualizações do Renovate?**
+
+R: Não. Todos os repositórios de desenvolvedores devem ter o Renovate habilitado e não devem desabilitar ou excluir pacotes de imagem do ACR do scan. Optar por sair cria dívida de dependência invisível e significa que patches de segurança nunca chegam àquela aplicação. Se um desenvolvedor tiver um motivo legítimo de compatibilidade para permanecer em uma versão específica da imagem pai, deve abrir uma Issue no GitHub documentando o motivo e a data-alvo de migração.
+
+---
+
+**P: Como lidar com imagens que não seguem semver? Por exemplo, `ubi8/openjdk-21`.**
+
+R: O `versioning: "loose"` do Renovate lida com tags não-semver fazendo uma comparação de melhor esforço. Para imagens com tags opacas (ex: baseadas em data ou hash), a equipe de Plataforma deve definir uma regra de `versioning` customizada no preset compartilhado e documentar o padrão de tag esperado. Se o versionamento não puder ser analisado de forma confiável, a imagem deve ser excluída das atualizações automáticas e gerenciada manualmente com um ciclo de revisão documentado.
+
+---
+
+**P: Temos um ambiente de staging. Podemos ter automerge lá e exigir aprovação manual apenas em produção?**
+
+R: O automerge por ambiente não é suportado nativamente pelo Renovate (ele age no repositório, não no alvo de deployment). O padrão recomendado é ter um branch `staging` separado onde atualizações de patch e minor podem ser mergeadas com revisão mais leve, e só promover para `main` após validação. Isso está fora do escopo do Renovate e deve ser tratado pelo pipeline de GitOps / promoção.
+
+---
+
+*Última atualização: Abril de 2026 — Equipe de Platform Engineering*
+*Ciclo de revisão: Anual ou após qualquer upgrade de versão major do Renovate*

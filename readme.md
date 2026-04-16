@@ -240,20 +240,32 @@ myacr.azurecr.io/base/nginx126:1.26.2-3
   "recreateClosed": true,
   "packageRules": [
     {
-      "description": "Red Hat — patch e minor: abre PR, revisão humana obrigatória, sem automerge",
+      "description": "Red Hat — patch (security): maior prioridade na fila, revisão humana obrigatória",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["registry.redhat.io/.*"],
-      "matchUpdateTypes": ["patch", "minor"],
+      "matchUpdateTypes": ["patch"],
       "versioning": "loose",
+      "prPriority": 10,
       "automerge": false,
       "addLabels": ["docker", "redhat", "security"]
     },
     {
-      "description": "Red Hat — major: bloqueado até aprovação manual",
+      "description": "Red Hat — minor: prioridade média, revisão humana obrigatória",
+      "matchDatasources": ["docker"],
+      "matchPackagePatterns": ["registry.redhat.io/.*"],
+      "matchUpdateTypes": ["minor"],
+      "versioning": "loose",
+      "prPriority": 5,
+      "automerge": false,
+      "addLabels": ["docker", "redhat", "security"]
+    },
+    {
+      "description": "Red Hat — major: menor prioridade, bloqueado até aprovação manual",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["registry.redhat.io/.*"],
       "matchUpdateTypes": ["major"],
       "versioning": "loose",
+      "prPriority": -1,
       "automerge": false,
       "dependencyDashboardApproval": true,
       "addLabels": ["docker", "redhat", "major-update", "breaking-change"]
@@ -301,22 +313,36 @@ Para imagens com tags completamente opacas (ex: baseadas em timestamp ou hash), 
   "prHourlyLimit": 2,
   "packageRules": [
     {
-      "description": "ACR imagens pai — patch e minor: automerge se CI aprovado",
+      "description": "ACR imagens pai — patch (security): maior prioridade, automerge se CI aprovado",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["myacr.azurecr.io/.*"],
-      "matchUpdateTypes": ["patch", "minor"],
+      "matchUpdateTypes": ["patch"],
       "versioning": "loose",
+      "prPriority": 10,
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "addLabels": ["docker", "base-image-update", "security"]
+    },
+    {
+      "description": "ACR imagens pai — minor: prioridade média, automerge se CI aprovado",
+      "matchDatasources": ["docker"],
+      "matchPackagePatterns": ["myacr.azurecr.io/.*"],
+      "matchUpdateTypes": ["minor"],
+      "versioning": "loose",
+      "prPriority": 5,
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true,
       "addLabels": ["docker", "base-image-update"]
     },
     {
-      "description": "ACR imagens pai — major: bloqueado até aprovação manual",
+      "description": "ACR imagens pai — major: menor prioridade, bloqueado até aprovação manual",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["myacr.azurecr.io/.*"],
       "matchUpdateTypes": ["major"],
       "versioning": "loose",
+      "prPriority": -1,
       "automerge": false,
       "dependencyDashboardApproval": true,
       "addLabels": ["docker", "major-update", "breaking-change"]
@@ -405,22 +431,36 @@ O arquivo `presets/acr-child-images.json` contém as regras completas que todos 
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "packageRules": [
     {
-      "description": "ACR imagens pai — patch e minor: automerge se CI aprovado",
+      "description": "ACR imagens pai — patch (security): maior prioridade, automerge se CI aprovado",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["myacr.azurecr.io/.*"],
-      "matchUpdateTypes": ["patch", "minor"],
+      "matchUpdateTypes": ["patch"],
       "versioning": "loose",
+      "prPriority": 10,
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "addLabels": ["docker", "base-image-update", "security"]
+    },
+    {
+      "description": "ACR imagens pai — minor: prioridade média, automerge se CI aprovado",
+      "matchDatasources": ["docker"],
+      "matchPackagePatterns": ["myacr.azurecr.io/.*"],
+      "matchUpdateTypes": ["minor"],
+      "versioning": "loose",
+      "prPriority": 5,
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true,
       "addLabels": ["docker", "base-image-update"]
     },
     {
-      "description": "ACR imagens pai — major: bloqueado até aprovação manual",
+      "description": "ACR imagens pai — major: menor prioridade, bloqueado até aprovação manual",
       "matchDatasources": ["docker"],
       "matchPackagePatterns": ["myacr.azurecr.io/.*"],
       "matchUpdateTypes": ["major"],
       "versioning": "loose",
+      "prPriority": -1,
       "automerge": false,
       "dependencyDashboardApproval": true,
       "addLabels": ["docker", "major-update", "breaking-change"]
@@ -509,6 +549,7 @@ Sem preset centralizado, qualquer mudança de governança — adicionar um label
 | `recreateClosed` | boolean | ambos | Se um PR do Renovate for fechado sem merge, ele será recriado na próxima execução. Evita que atualizações desapareçam silenciosamente da fila. |
 | `prConcurrentLimit` | number | repos de dev | Número máximo de PRs abertos simultaneamente por repo. Quando o limite é atingido, o Renovate para de abrir novos até que os existentes sejam resolvidos. |
 | `prHourlyLimit` | number | repos de dev | Número máximo de PRs que o Renovate pode abrir por hora por repo. Cadencia a abertura independentemente de quantos estão abertos. |
+| `prPriority` | number | ambos | Define a ordem de abertura de PRs quando há mais atualizações pendentes do que os limites permitem processar. Número maior = abre antes. Valores usados neste modelo: `10` (patch/security), `5` (minor), `-1` (major). |
 
 ---
 

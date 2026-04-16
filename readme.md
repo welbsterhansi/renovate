@@ -325,24 +325,68 @@ Para imagens com tags completamente opacas (ex: baseadas em timestamp ou hash), 
 }
 ```
 
-**Por que `prConcurrentLimit` e `prHourlyLimit` estão aqui e não no `base-images`?**
+**Por que `pinDigests: false` nos repos de dev?**
 
-Os repos de dev são o ponto de amplificação do modelo. Quando uma imagem pai é mergeada e publicada no ACR, o Renovate detecta a nova tag e dispara PRs em **todos os repos filhos ao mesmo tempo**. Sem limites, uma única atualização de imagem pai pode gerar dezenas de PRs simultâneos, saturando runners de CI, gerando ruído de notificações para os times e dificultando a triagem de falhas.
+O `pinDigests` controla se o Renovate vai fixar o `FROM` ao sha256 da imagem. Nos repos de dev isso deve estar **desligado** — se o Renovate travasse o `FROM` filho no sha256 do ACR, ele nunca conseguiria abrir PRs de atualização, porque o sha256 só muda quando você empurra uma nova imagem para o ACR, e o Renovate não rastrearia essa mudança. A propagação automática quebraria.
+
+No `base-images` o `pinDigests: true` é obrigatório — é exatamente o que garante que o `FROM` da Red Hat fique travado no sha256 e toda mudança upstream vire um PR explícito.
+
+| Nível | `pinDigests` | Motivo |
+|---|---|---|
+| `base-images` (imagem pai) | `true` | Trava o FROM da Red Hat no sha256, evita image drift |
+| Repos de dev (imagem filha) | `false` | Mantém a cadeia de propagação funcionando |
+
+---
+
+**O que fazem `prConcurrentLimit` e `prHourlyLimit` na prática?**
+
+Imagine que a imagem pai foi aprovada e mergeada. O Renovate vai no ACR, vê a nova tag e quer abrir PRs em todos os repos de dev — digamos que são 40 repos.
+
+**Sem os limites:** 40 PRs abrem em segundos. 40 builds de CI disparam ao mesmo tempo disputando os mesmos runners. 40 notificações chegam para os devs. Se 3 falham, fica difícil saber se é problema da imagem ou do CI sobrecarregado.
+
+**Com os limites:**
+
+- `prConcurrentLimit: 5` — o Renovate olha quantos PRs estão abertos naquele repo no momento. Se já tem 5 abertos e nenhum foi resolvido ainda, ele para e aguarda. Conforme os PRs vão sendo mergeados ou fechados, ele vai abrindo os próximos.
+- `prHourlyLimit: 2` — independente de quantos estão abertos, ele abre no máximo 2 PRs por hora naquele repo. Cadencia a abertura ao longo do tempo.
+
+O resultado é um fluxo controlado: o CI absorve os builds em lotes, os devs recebem notificações de forma escalonada, e se algo falhar fica muito mais fácil isolar se o problema é da imagem ou de um repo específico.
 
 O `base-images` não precisa desses limites — ele recebe um PR por atualização de imagem upstream, sem efeito cascata.
 
-| Parâmetro | Valor | Efeito |
+| Parâmetro | Valor | O que faz |
 |---|---|---|
-| `prConcurrentLimit` | `5` | Máximo de 5 PRs abertos ao mesmo tempo por repo |
-| `prHourlyLimit` | `2` | Máximo de 2 PRs criados por hora por repo |
+| `prConcurrentLimit` | `5` | Para de abrir novos PRs se já tem 5 abertos no repo |
+| `prHourlyLimit` | `2` | Abre no máximo 2 PRs por hora no repo |
 
-Os valores `5` e `2` são um ponto de partida razoável. Ajuste conforme a capacidade do seu CI — times com runners dedicados e rápidos podem subir esses valores sem problema.
+Os valores `5` e `2` são um ponto de partida. Ajuste conforme a capacidade dos seus runners.
 
 > **Pré-requisito para automerge:** O branch protection do GitHub deve ter status checks obrigatórios (`image-build`, `image-scan`). Sem isso, o Renovate pode mergear uma PR com build quebrado.
 
 ### 6.3 Preset compartilhado — centralização via `extends`
 
 O Renovate tem um sistema de herança de configuração via presets. Em vez de cada repositório de desenvolvedor manter seu próprio `renovate.json` completo, todos estendem um único arquivo mantido pela equipe de Plataforma. Quando a regra muda, você altera **um arquivo** — na próxima execução do Renovate (ciclo padrão: a cada hora), todos os repos já pegam a mudança sem nenhum PR nos repos de dev.
+
+#### Exemplo prático do fluxo completo
+
+Cenário: sua org tem 30 repos de imagens filhas. Você quer mudar o limite de PRs de 5 para 10.
+
+**Sem preset centralizado:**
+```
+você → abre PR em repo-1   → aguarda review → merge
+você → abre PR em repo-2   → aguarda review → merge
+...
+você → abre PR em repo-30  → aguarda review → merge
+```
+30 PRs, 30 reviews, risco de inconsistência entre repos enquanto os merges não acontecem.
+
+**Com preset centralizado:**
+```
+você → 1 commit em renovate-config/presets/acr-child-images.json
+                    ↓
+       Renovate lê o preset atualizado na próxima execução
+                    ↓
+       todos os 30 repos já usam a nova regra automaticamente
+```
 
 #### Estrutura do repo centralizador
 

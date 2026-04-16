@@ -494,6 +494,67 @@ Sem preset centralizado, qualquer mudança de governança — adicionar um label
 
 ---
 
+### 6.4 Referência de parâmetros — todos os campos usados nas configs
+
+#### Parâmetros de nível raiz (fora de `packageRules`)
+
+| Parâmetro | Tipo | Onde aparece | O que faz |
+|---|---|---|---|
+| `$schema` | string | ambos | Aponta para o JSON Schema oficial do Renovate. Habilita validação e autocomplete no editor. |
+| `extends` | array | ambos | Herda configurações de presets externos ou internos. Aplicados da esquerda para a direita — o último sobrescreve o anterior. |
+| `dependencyDashboard` | boolean | ambos | Cria e mantém uma Issue no GitHub listando todas as atualizações pendentes, bloqueadas e em erro. |
+| `dependencyDashboardTitle` | string | ambos | Define o título da Issue do Dependency Dashboard. Útil para diferenciar entre o dashboard do `base-images` e dos repos de dev. |
+| `docker.enabled` | boolean | ambos | Habilita o monitoramento de imagens Docker pelo Renovate. Sem isso, o Renovate ignora os `FROM` dos Dockerfiles. |
+| `docker.pinDigests` | boolean | ambos | `true` → Renovate adiciona e mantém o sha256 no `FROM`. `false` → Renovate gerencia apenas a tag, sem fixar ao digest. |
+| `recreateClosed` | boolean | ambos | Se um PR do Renovate for fechado sem merge, ele será recriado na próxima execução. Evita que atualizações desapareçam silenciosamente da fila. |
+| `prConcurrentLimit` | number | repos de dev | Número máximo de PRs abertos simultaneamente por repo. Quando o limite é atingido, o Renovate para de abrir novos até que os existentes sejam resolvidos. |
+| `prHourlyLimit` | number | repos de dev | Número máximo de PRs que o Renovate pode abrir por hora por repo. Cadencia a abertura independentemente de quantos estão abertos. |
+
+---
+
+#### Parâmetros dentro de `packageRules`
+
+Cada entrada em `packageRules` é um conjunto de **filtros** (`match*`) + **ações**. O Renovate aplica a regra apenas às dependências que satisfazem todos os filtros simultaneamente.
+
+| Parâmetro | Tipo | O que faz |
+|---|---|---|
+| `description` | string | Texto livre para documentar a intenção da regra. Não tem efeito funcional — serve para legibilidade e auditoria. |
+| `matchDatasources` | array | Filtra por fonte de dados. `"docker"` corresponde a imagens de container. Outros valores: `"npm"`, `"pypi"`, `"maven"`, etc. |
+| `matchPackagePatterns` | array | Filtra por nome do pacote usando regex. `"registry.redhat.io/.*"` captura qualquer imagem do registry da Red Hat. |
+| `matchPackageNames` | array | Filtra por nome exato do pacote. Usado para sobrescrever regras em imagens específicas. |
+| `matchUpdateTypes` | array | Filtra pelo tipo de atualização: `"patch"`, `"minor"`, `"major"`, `"digest"` (mudança de sha256 sem mudança de tag). |
+| `versioning` | string | Define como o Renovate interpreta e compara as tags da imagem. `"loose"` → semver permissivo, aceita formatos como `8.9-1105`. `"docker"` → default, comparação básica. `"regex"` → padrão customizado. |
+| `automerge` | boolean | `true` → o Renovate mergea o PR automaticamente se todos os status checks passarem. `false` → PR fica aberto aguardando revisão humana. |
+| `automergeType` | string | `"pr"` → cria um PR e faz automerge dele. `"branch"` → faz merge direto no branch sem criar PR (não recomendado com branch protection). |
+| `platformAutomerge` | boolean | `true` → usa o mecanismo de automerge nativo do GitHub (merge queue / auto-merge button) em vez do Renovate fazer o merge diretamente. Mais confiável com branch protection habilitado. |
+| `dependencyDashboardApproval` | boolean | `true` → o PR é criado mas fica **bloqueado** até que alguém marque a checkbox correspondente na Issue do Dependency Dashboard. Usado em atualizações major. |
+| `addLabels` | array | Lista de labels que serão adicionadas automaticamente ao PR. Facilita filtragem, relatórios e subscriptions de notificação no GitHub. |
+
+---
+
+#### Resumo visual: fluxo de decisão de uma regra
+
+```
+Renovate detecta nova versão de imagem
+          │
+          ▼
+matchDatasources + matchPackagePatterns + matchUpdateTypes
+  → todos batem? aplica a regra
+  → algum não bate? ignora e testa a próxima regra
+          │
+          ▼
+versioning → classifica corretamente como patch/minor/major
+          │
+          ▼
+dependencyDashboardApproval: true? → PR bloqueado até checkbox
+          │
+          ▼
+automerge: true + CI verde? → merge automático
+automerge: false?           → PR aguarda revisão humana
+```
+
+---
+
 ## 7. Fluxo de Aprovação
 
 ### 7.1 Patch / Minor — imagem pai (`base-images`)

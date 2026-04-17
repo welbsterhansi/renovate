@@ -86,7 +86,7 @@ Este documento foi elaborado com base nas seguintes referências normativas e fr
 Toda imagem em execução no OpenShift percorre obrigatoriamente esta cadeia. Não existe atalho — imagens externas são bloqueadas pelo cluster.
 
 ```mermaid
-%%{init: {'theme': 'default'}}%%
+%%{init: {'theme': 'default', 'themeVariables': {'background': '#ffffff', 'mainBkg': '#ffffff'}}}%%
 flowchart TD
     RH(["registry.redhat.io"])
 
@@ -134,7 +134,7 @@ flowchart TD
 Cada imagem — pai ou filha — passa pelos seguintes stages ao longo de sua vida:
 
 ```mermaid
-%%{init: {'theme': 'default'}}%%
+%%{init: {'theme': 'default', 'themeVariables': {'background': '#ffffff', 'mainBkg': '#ffffff'}}}%%
 flowchart LR
     C["CRIAÇÃO"]
     U["USO ATIVO"]
@@ -713,7 +713,7 @@ Waivers não podem ultrapassar 30 dias para CVEs críticos.
 A regra de que só imagens do ACR são permitidas é enforçada em duas camadas independentes — uma no CI antes do push, outra no cluster no momento do deploy. Se uma falhar, a outra ainda bloqueia.
 
 ```mermaid
-%%{init: {'theme': 'default'}}%%
+%%{init: {'theme': 'default', 'themeVariables': {'background': '#ffffff', 'mainBkg': '#ffffff'}}}%%
 flowchart TD
     DF["Dockerfile\nFROM myacr.azurecr.io/..."]
 

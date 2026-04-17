@@ -85,52 +85,52 @@ Este documento foi elaborado com base nas seguintes referências normativas e fr
 
 Toda imagem em execução no OpenShift percorre obrigatoriamente esta cadeia. Não existe atalho — imagens externas são bloqueadas pelo cluster.
 
-```
-  registry.redhat.io
-         │
-         │  Renovate monitora e abre PR no base-images
-         ▼
-  ┌──────────────────────────────────────┐
-  │  base-images (GitHub)               │◀── GHAS: dependency review,
-  │  Equipe de Plataforma revisa e      │    secret scanning, CodeQL
-  │  mergea o PR                        │
-  │  CI: trivy (gate) + validate        │◀── trivy bloqueia push se CVE crítico
-  └────────────────┬─────────────────────┘
-                   │
-                   │  CI faz push + cosign assina a imagem
-                   ▼
-  ┌──────────────────────────────────────┐
-  │  ACR — imagens pai                  │◀── Defender for Cloud: scan profundo
-  │  ex: myacr.azurecr.io/base/ubi8:2.1 │    assíncrono após cada push
-  │  + assinatura cosign armazenada     │◀── Azure Policy: bloqueia pull
-  └────────────────┬─────────────────────┘    se CVE crítico ativo
-                   │
-                   │  Renovate detecta nova tag no ACR
-                   │  e abre PR nos repos de dev
-                   ▼
-  ┌──────────────────────────────────────┐
-  │  repos de dev (GitHub)              │◀── GHAS: dependency review,
-  │  Dev aprova PR (patch/minor: auto)  │    secret scanning
-  │  CI: trivy (gate)                   │◀── trivy bloqueia push se CVE crítico
-  └────────────────┬─────────────────────┘
-                   │
-                   │  CI faz push + cosign assina a imagem
-                   ▼
-  ┌──────────────────────────────────────┐
-  │  ACR — imagens filhas               │◀── Defender for Cloud: scan profundo
-  │  ex: myacr.azurecr.io/apps/app:1.4  │    Azure Policy: bloqueia pull
-  │  + assinatura cosign armazenada     │    se CVE crítico ativo
-  └────────────────┬─────────────────────┘
-                   │
-                   │  GitHub Actions faz deploy
-                   │  (futuro: ArgoCD sync)
-                   ▼
-  ┌──────────────────────────────────────┐
-  │  OpenShift ARO                      │◀── Kyverno verifyImages:
-  │  Workloads em execução              │    bloqueia pod sem assinatura
-  │                                     │    cosign válida do CI
-  └──────────────────────────────────────┘◀── Kyverno: bloqueia imagens
-                                              fora do ACR
+```mermaid
+flowchart TD
+    RH(["registry.redhat.io"])
+
+    BI["base-images — GitHub\nEquipe de Plataforma revisa e mergea o PR\nCI: trivy · validate-dockerfile · tag-validator"]
+
+    ACRP["ACR — imagens pai\nmyacr.azurecr.io/base/ubi8:2.1\n+ assinatura cosign armazenada"]
+
+    DEV["repos de dev — GitHub\nDev aprova PR · patch e minor: automerge\nCI: trivy · validate-dockerfile"]
+
+    ACRF["ACR — imagens filhas\nmyacr.azurecr.io/apps/app:1.4\n+ assinatura cosign armazenada"]
+
+    OCP["OpenShift ARO\nWorkloads em execução"]
+
+    GHAS["GHAS\nDependency Review · Secret Scanning · CodeQL\nbloqueia merge se CVE ou segredo detectado"]
+
+    TRIVY["trivy\ngate de build-time\nbloqueia push se CVE crítico"]
+
+    DEFENDER["Microsoft Defender for Cloud\nScan profundo assíncrono no ACR\nAzure Policy: bloqueia pull se CVE ativo"]
+
+    KYVERNO["Kyverno\nverifyImages: bloqueia pod sem assinatura cosign válida\nACR-only: bloqueia imagens de registries externos"]
+
+    RH -->|"Renovate monitora\nabre PR no base-images"| BI
+    BI -->|"CI push\ncosign sign"| ACRP
+    ACRP -->|"Renovate detecta nova tag\nabre PR nos repos de dev"| DEV
+    DEV -->|"CI push\ncosign sign"| ACRF
+    ACRF -->|"GitHub Actions deploy\nfuturo: ArgoCD sync"| OCP
+
+    GHAS -. "PR gate" .-> BI
+    GHAS -. "PR gate" .-> DEV
+    TRIVY -. "CI gate" .-> BI
+    TRIVY -. "CI gate" .-> DEV
+    DEFENDER -. "scan + Azure Policy" .-> ACRP
+    DEFENDER -. "scan + Azure Policy" .-> ACRF
+    KYVERNO -. "admission gate" .-> OCP
+
+    style RH fill:#cc0000,color:#fff,stroke:#990000
+    style BI fill:#2d333b,color:#fff,stroke:#444
+    style ACRP fill:#0072c6,color:#fff,stroke:#005a9e
+    style DEV fill:#2d333b,color:#fff,stroke:#444
+    style ACRF fill:#0072c6,color:#fff,stroke:#005a9e
+    style OCP fill:#c00,color:#fff,stroke:#900
+    style GHAS fill:#24292e,color:#fff,stroke:#444
+    style TRIVY fill:#1904da,color:#fff,stroke:#1904da
+    style DEFENDER fill:#0078d4,color:#fff,stroke:#005a9e
+    style KYVERNO fill:#326ce5,color:#fff,stroke:#1a56cc
 ```
 
 ### 1.2 Stages do ciclo de vida

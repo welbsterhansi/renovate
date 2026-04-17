@@ -894,3 +894,11 @@ R: O automerge por ambiente não é suportado nativamente pelo Renovate (ele age
 
 *Última atualização: Abril de 2026 — Equipe de Platform Engineering*
 *Ciclo de revisão: Anual ou após qualquer upgrade de versão major do Renovate*
+
+---
+
+## Documento relacionado
+
+Para o ciclo de vida completo de imagens — deprecação, remediação de CVEs, enforcement no OpenShift e processo para forçar atualizações nos times de dev — consulte:
+
+**[`image-lifecycle.md`](./image-lifecycle.md) — Ciclo de Vida de Imagens de Container**

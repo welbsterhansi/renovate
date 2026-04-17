@@ -183,7 +183,8 @@ Cada imagem — pai ou filha — passa pelos seguintes stages ao longo de sua vi
 %%{init: {'theme': 'default', 'themeVariables': {'background': '#ffffff', 'mainBkg': '#ffffff'}}}%%
 flowchart LR
     C["CREATE"]
-    U["ACTIVE USE"]
+    U["ACTIVE USE\nrunning in cluster"]
+    AUDIT(["CLUSTER AUDIT\nweekly digest check\nmax 30d running"])
     R["REMEDIATION\nrebuild · redeploy"]
     W["WAIVER\nno fix available"]
     D["DEPRECATION\nnewer version or EOL"]
@@ -198,17 +199,93 @@ flowchart LR
     U --> D
     D --> E
 
+    U -. "weekly" .-> AUDIT
+    AUDIT -. "digest mismatch\nor > 30d running" .-> R
     U -. "weekly · unused tags\noutside keep policy" .-> EXP
     E -. "full removal\nafter zero workloads\nconfirmed" .-> EXP
 
     style C fill:#2d833b,color:#fff,stroke:#1a5c28
     style U fill:#0072c6,color:#fff,stroke:#005a9e
+    style AUDIT fill:#1a7a6e,color:#fff,stroke:#135c52
     style R fill:#e67e00,color:#fff,stroke:#b36200
     style W fill:#d4a017,color:#fff,stroke:#a37c10
     style D fill:#8e44ad,color:#fff,stroke:#6c3483
     style E fill:#c0392b,color:#fff,stroke:#922b21
     style EXP fill:#555,color:#fff,stroke:#333
 ```
+
+#### Cluster Audit — imagens em execução no OpenShift
+
+**O problema:** o expurgo de tags no ACR controla o que existe no registry. Mas uma imagem pode ser removida do ACR e continuar a correr no cluster — ou simplesmente nunca ter sido atualizada porque o time não fez deploy da nova versão. O boss não quer imagens antigas no cluster; a política de expurgo do ACR não resolve isso.
+
+**A solução: audit semanal dos pods em execução.** Um GitHub Actions com cron verifica semanalmente o digest de todas as imagens a correr no OpenShift e compara com o digest mais recente e assinado no ACR. Se divergir — ou se a imagem está há mais de 30 dias no cluster sem redeploy — o workflow aciona um `kubectl rollout restart` ou abre um alerta para o time.
+
+```yaml
+# .github/workflows/cluster-image-audit.yml
+name: Cluster Image Age Audit
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # toda segunda-feira às 08h
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login ACR
+        run: az acr login --name myacr
+
+      - name: Get running image digests from OpenShift
+        run: |
+          oc get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.status.containerStatuses[*].imageID}{"\n"}{end}' \
+            > running-images.txt
+          cat running-images.txt
+
+      - name: Compare with latest ACR digest
+        run: |
+          STALE=false
+          while IFS=$'\t' read -r NS POD IMAGEID; do
+            IMAGE=$(echo "$IMAGEID" | grep -oP 'myacr\.azurecr\.io[^\s@]+')
+            [ -z "$IMAGE" ] && continue
+
+            ACR_DIGEST=$(az acr repository show-manifests \
+              --name myacr --repository "${IMAGE%%:*}" \
+              --query "[?tags[0]=='latest'].digest | [0]" -o tsv)
+
+            RUNNING_DIGEST=$(echo "$IMAGEID" | grep -oP 'sha256:[a-f0-9]+')
+
+            if [ "$RUNNING_DIGEST" != "$ACR_DIGEST" ]; then
+              echo "::warning::$NS/$POD running stale image — digest mismatch"
+              STALE=true
+            fi
+          done < running-images.txt
+
+          if [ "$STALE" = true ]; then exit 1; fi
+
+      - name: Check running image age (max 30 days)
+        run: |
+          CUTOFF=$(date -d "-30 days" +%s)
+          oc get pods -A -o json | jq -r '
+            .items[] |
+            select(.status.containerStatuses != null) |
+            .metadata.namespace + "\t" + .metadata.name + "\t" +
+            (.status.containerStatuses[].state.running.startedAt // "")
+          ' | while IFS=$'\t' read -r NS POD STARTED; do
+            [ -z "$STARTED" ] && continue
+            STARTED_EPOCH=$(date -d "$STARTED" +%s)
+            if [ "$STARTED_EPOCH" -lt "$CUTOFF" ]; then
+              echo "::warning::$NS/$POD has been running for more than 30 days — force redeploy required"
+            fi
+          done
+```
+
+**Política de idade máxima no cluster:** nenhum pod deve correr a mesma imagem por mais de **30 dias** sem redeploy. Este limite garante que:
+- Patches de segurança publicados pela Red Hat chegam ao cluster dentro do ciclo de atualização do Renovate
+- O digest em execução no cluster está sempre próximo do digest assinado no ACR
+- Um eventual CVE que escapou ao trivy e ao Defender é substituído no próximo ciclo, mesmo sem alerta ativo
+
+> **Nota:** o limite de 30 dias no cluster é independente do limite de 60 dias de tags no ACR. O ACR guarda o histórico de tags para rollback. O cluster só deve ter a versão mais recente a correr.
 
 #### Remediação — como funciona na prática
 

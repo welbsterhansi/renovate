@@ -89,23 +89,19 @@ Toda imagem em execução no OpenShift percorre obrigatoriamente esta cadeia. N�
 flowchart TD
     RH(["registry.redhat.io"])
 
-    BI["base-images — GitHub\nEquipe de Plataforma revisa e mergea o PR\nCI: trivy · validate-dockerfile · tag-validator"]
+    BI["base-images — GitHub\nEquipe de Plataforma revisa e mergea o PR\nCI: build · scan · validate"]
 
     ACRP["ACR — imagens pai\nmyacr.azurecr.io/base/ubi8:2.1\n+ assinatura cosign armazenada"]
 
-    DEV["repos de dev — GitHub\nDev aprova PR · patch e minor: automerge\nCI: trivy · validate-dockerfile"]
+    DEV["repos de dev — GitHub\nDev aprova PR · patch e minor: automerge\nCI: build · scan · validate"]
 
     ACRF["ACR — imagens filhas\nmyacr.azurecr.io/apps/app:1.4\n+ assinatura cosign armazenada"]
 
     OCP["OpenShift ARO\nWorkloads em execução"]
 
-    GHAS["GHAS\nDependency Review · Secret Scanning · CodeQL\nbloqueia merge se CVE ou segredo detectado"]
-
-    TRIVY["trivy\ngate de build-time\nbloqueia push se CVE crítico"]
-
     DEFENDER["Microsoft Defender for Cloud\nScan profundo assíncrono no ACR\nAzure Policy: bloqueia pull se CVE ativo"]
 
-    KYVERNO["Kyverno\nverifyImages: bloqueia pod sem assinatura cosign válida\nACR-only: bloqueia imagens de registries externos"]
+    KYVERNO["Kyverno\nverifyImages: valida assinatura cosign\nACR-only: bloqueia registries externos"]
 
     RH -->|"Renovate monitora\nabre PR no base-images"| BI
     BI -->|"CI push\ncosign sign"| ACRP
@@ -113,10 +109,6 @@ flowchart TD
     DEV -->|"CI push\ncosign sign"| ACRF
     ACRF -->|"GitHub Actions deploy\nfuturo: ArgoCD sync"| OCP
 
-    GHAS -. "PR gate" .-> BI
-    GHAS -. "PR gate" .-> DEV
-    TRIVY -. "CI gate" .-> BI
-    TRIVY -. "CI gate" .-> DEV
     DEFENDER -. "scan + Azure Policy" .-> ACRP
     DEFENDER -. "scan + Azure Policy" .-> ACRF
     KYVERNO -. "admission gate" .-> OCP
@@ -127,8 +119,6 @@ flowchart TD
     style DEV fill:#2d333b,color:#fff,stroke:#444
     style ACRF fill:#0072c6,color:#fff,stroke:#005a9e
     style OCP fill:#c00,color:#fff,stroke:#900
-    style GHAS fill:#24292e,color:#fff,stroke:#444
-    style TRIVY fill:#1904da,color:#fff,stroke:#1904da
     style DEFENDER fill:#0078d4,color:#fff,stroke:#005a9e
     style KYVERNO fill:#326ce5,color:#fff,stroke:#1a56cc
 ```

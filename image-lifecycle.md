@@ -99,6 +99,8 @@ flowchart TD
 
     OCP["OpenShift ARO\nWorkloads em execução"]
 
+    HADOLINT["hadolint\nvalida FROM no Dockerfile\nbloqueia registries externos no CI"]
+
     DEFENDER["Microsoft Defender for Cloud\nScan profundo assíncrono no ACR\nAzure Policy: bloqueia pull se CVE ativo"]
 
     KYVERNO["Kyverno\nverifyImages: valida assinatura cosign\nACR-only: bloqueia registries externos"]
@@ -109,6 +111,8 @@ flowchart TD
     DEV -->|"CI push\ncosign sign"| ACRF
     ACRF -->|"GitHub Actions deploy\nfuturo: ArgoCD sync"| OCP
 
+    HADOLINT -. "CI gate\nDockerfile" .-> BI
+    HADOLINT -. "CI gate\nDockerfile" .-> DEV
     DEFENDER -. "scan + Azure Policy" .-> ACRP
     DEFENDER -. "scan + Azure Policy" .-> ACRF
     KYVERNO -. "admission gate" .-> OCP
@@ -119,6 +123,7 @@ flowchart TD
     style DEV fill:#2d333b,color:#fff,stroke:#444
     style ACRF fill:#0072c6,color:#fff,stroke:#005a9e
     style OCP fill:#c00,color:#fff,stroke:#900
+    style HADOLINT fill:#f39c12,color:#fff,stroke:#d68910
     style DEFENDER fill:#0078d4,color:#fff,stroke:#005a9e
     style KYVERNO fill:#326ce5,color:#fff,stroke:#1a56cc
 ```
@@ -127,20 +132,35 @@ flowchart TD
 
 Cada imagem — pai ou filha — passa pelos seguintes stages ao longo de sua vida:
 
-```
-  ┌───────────┐    ┌────────────┐    ┌─────────────┐    ┌─────────────┐    ┌──────────┐
-  │  CRIAÇÃO  │───▶│ USO ATIVO  │───▶│ REMEDIAÇÃO  │───▶│ DEPRECAÇÃO  │───▶│   EOL    │
-  │           │    │            │    │ (se CVE)    │    │             │    │ EXPURGO  │
-  └───────────┘    └────────────┘    └─────────────┘    └─────────────┘    └──────────┘
-                        │                  ▲
-                        │  CVE detectado   │
-                        └──────────────────┘
-                          ciclo pode repetir
-                          várias vezes durante
-                          o uso ativo
+```mermaid
+flowchart LR
+    C["CRIAÇÃO"]
+    U["USO ATIVO"]
+    R["REMEDIAÇÃO\nse CVE detectado"]
+    D["DEPRECAÇÃO"]
+    E["EOL"]
+    EXP["EXPURGO\ntags antigas no ACR\nkeep 5 dev/qa · keep 10 prod\nmáx 60 dias"]
+
+    C --> U
+    U --> R
+    R -->|"CVE corrigido\nvolta ao uso ativo"| U
+    U --> D
+    D --> E
+
+    U -. "roda semanalmente\ntags fora do keep\ne sem uso no cluster" .-> EXP
+    E -. "remoção total\napós confirmar\nzero workloads" .-> EXP
+
+    style C fill:#2d833b,color:#fff,stroke:#1a5c28
+    style U fill:#0072c6,color:#fff,stroke:#005a9e
+    style R fill:#e67e00,color:#fff,stroke:#b36200
+    style D fill:#8e44ad,color:#fff,stroke:#6c3483
+    style E fill:#c0392b,color:#fff,stroke:#922b21
+    style EXP fill:#555,color:#fff,stroke:#333
 ```
 
 > **Remediação não é um stage terminal** — uma imagem pode passar por múltiplos ciclos de remediação durante o uso ativo antes de chegar à deprecação.
+>
+> **Expurgo acontece em dois momentos** — continuamente durante o uso ativo (tags antigas além do keep) e na saída do EOL (remoção total após confirmar zero workloads no cluster.
 
 ---
 
@@ -688,9 +708,68 @@ Waivers não podem ultrapassar 30 dias para CVEs críticos.
 
 ## 6. Enforcement no OpenShift
 
+A regra de que só imagens do ACR são permitidas é enforçada em duas camadas independentes — uma no CI antes do push, outra no cluster no momento do deploy. Se uma falhar, a outra ainda bloqueia.
+
+```mermaid
+flowchart TD
+    DF["Dockerfile\nFROM myacr.azurecr.io/..."]
+
+    subgraph CI ["CI — GitHub Actions"]
+        HL["hadolint\nvalida FROM no Dockerfile\nbloqueia se referenciar\nregistry externo"]
+        BUILD["build + trivy + cosign sign"]
+    end
+
+    subgraph ACR ["ACR — Azure Container Registry"]
+        IMG["imagem armazenada\n+ assinatura cosign"]
+        AZP["Azure Policy\nbloqueia pull\nse CVE crítico ativo"]
+    end
+
+    subgraph OCP ["OpenShift ARO — Admission"]
+        KV1["Kyverno: require-acr-images\nbloqueia pods com imagens\nde registries externos"]
+        KV2["Kyverno: verify-image-signature\nbloqueia pods com imagens\nsem assinatura cosign válida"]
+        POD["Pod admitido\ne em execução"]
+    end
+
+    DF --> HL
+    HL -->|"FROM válido\nbloqueia se externo"| BUILD
+    BUILD -->|"push + cosign sign"| IMG
+    IMG --> AZP
+    AZP -->|"CVE crítico?\nbloqueia pull"| KV1
+    KV1 -->|"registry é ACR?\nbloqueia se externo"| KV2
+    KV2 -->|"assinatura válida?\nbloqueia se inválida"| POD
+
+    style HL fill:#f39c12,color:#fff,stroke:#d68910
+    style BUILD fill:#2d333b,color:#fff,stroke:#444
+    style IMG fill:#0072c6,color:#fff,stroke:#005a9e
+    style AZP fill:#0078d4,color:#fff,stroke:#005a9e
+    style KV1 fill:#326ce5,color:#fff,stroke:#1a56cc
+    style KV2 fill:#326ce5,color:#fff,stroke:#1a56cc
+    style POD fill:#2d833b,color:#fff,stroke:#1a5c28
+```
+
 ### 6.1 Política — somente imagens do ACR são permitidas
 
 Nenhum workload no cluster deve executar imagens de registries externos. Toda imagem deve passar pelo pipeline do ACR e pelos gates de qualidade da organização.
+
+**hadolint — gate no CI (antes do build):**
+
+O hadolint valida o Dockerfile antes de qualquer build. Se o `FROM` referenciar um registry que não seja o ACR, o pipeline falha imediatamente — a imagem nem chega a ser construída.
+
+```bash
+# Exemplo de configuração .hadolint.yaml
+allowed-registries:
+  - myacr.azurecr.io
+```
+
+```yaml
+# Step no GitHub Actions
+- name: Lint Dockerfile com hadolint
+  uses: hadolint/hadolint-action@v3.1.0
+  with:
+    dockerfile: Dockerfile
+    config: .hadolint.yaml
+    failure-threshold: error
+```
 
 **Implementação com Kyverno:**
 

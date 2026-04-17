@@ -38,12 +38,13 @@ Toda imagem em execução no OpenShift percorre obrigatoriamente esta cadeia. N�
   │  CI: trivy (gate) + validate        │◀── trivy bloqueia push se CVE crítico
   └────────────────┬─────────────────────┘
                    │
-                   │  CI faz push da imagem pai
+                   │  CI faz push + cosign assina a imagem
                    ▼
   ┌──────────────────────────────────────┐
   │  ACR — imagens pai                  │◀── Defender for Cloud: scan profundo
   │  ex: myacr.azurecr.io/base/ubi8:2.1 │    assíncrono após cada push
-  └────────────────┬─────────────────────┘
+  │  + assinatura cosign armazenada     │◀── Azure Policy: bloqueia pull
+  └────────────────┬─────────────────────┘    se CVE crítico ativo
                    │
                    │  Renovate detecta nova tag no ACR
                    │  e abre PR nos repos de dev
@@ -54,21 +55,23 @@ Toda imagem em execução no OpenShift percorre obrigatoriamente esta cadeia. N�
   │  CI: trivy (gate)                   │◀── trivy bloqueia push se CVE crítico
   └────────────────┬─────────────────────┘
                    │
-                   │  CI faz push da imagem filha
+                   │  CI faz push + cosign assina a imagem
                    ▼
   ┌──────────────────────────────────────┐
   │  ACR — imagens filhas               │◀── Defender for Cloud: scan profundo
   │  ex: myacr.azurecr.io/apps/app:1.4  │    Azure Policy: bloqueia pull
-  └────────────────┬─────────────────────┘    se CVE crítico ativo
+  │  + assinatura cosign armazenada     │    se CVE crítico ativo
+  └────────────────┬─────────────────────┘
                    │
                    │  GitHub Actions faz deploy
                    │  (futuro: ArgoCD sync)
                    ▼
   ┌──────────────────────────────────────┐
-  │  OpenShift                          │◀── Defender runtime: monitora
-  │  Workloads em execução              │    comportamento dos containers
-  │  Kyverno: enforcement de políticas  │◀── Kyverno: bloqueia imagens
-  └──────────────────────────────────────┘    fora do ACR
+  │  OpenShift ARO                      │◀── Kyverno verifyImages:
+  │  Workloads em execução              │    bloqueia pod se imagem não
+  │                                     │    tiver assinatura cosign válida
+  └──────────────────────────────────────┘◀── Kyverno: bloqueia imagens
+                                              fora do ACR
 ```
 
 ### 1.2 Stages do ciclo de vida
@@ -102,9 +105,12 @@ O modelo usa três ferramentas complementares que atuam em momentos diferentes d
 |---|---|---|---|
 | PR aberto (GitHub) | GHAS | Dependency review, secret scanning, CodeQL | Sim — bloqueia merge |
 | CI executa (antes do push) | trivy | Gate rápido de CVE crítico em imagem | Sim — bloqueia push |
+| CI após push no ACR | cosign | Assina a imagem com chave do CI | Não bloqueia — habilita validação |
 | Após push no ACR | Defender for Cloud | Scan profundo e contínuo das imagens | Sim — via Azure Policy |
-| Pull pelo OpenShift | Azure Policy + Defender | Bloqueia pull de imagens com CVE ativo | Sim — 403 no pull |
-| Containers em execução | Defender runtime | Comportamento suspeito, escalonamento | Alerta + resposta |
+| Pull pelo OpenShift | Azure Policy + Defender | Bloqueia pull de imagens com CVE ativo | Sim — 403 no ACR |
+| Admission no OpenShift | Kyverno verifyImages | Valida assinatura cosign antes de admitir pod | Sim — pod não sobe |
+
+> **Defender runtime não está ativo no OpenShift ARO** — a instalação dos agents Defender no ARO não é suportada no ambiente atual. O enforcement no cluster é feito inteiramente via Kyverno.
 
 ### 2.2 GHAS — GitHub Advanced Security
 
@@ -143,7 +149,7 @@ O trivy não é o scanner principal de observabilidade — ele é o freio de eme
 
 ### 2.4 Microsoft Defender for Cloud
 
-O Defender opera em duas camadas distintas após o push:
+O Defender opera em duas camadas no ACR. **Runtime protection no cluster não está ativo** — a instalação dos agents no OpenShift ARO não é suportada no ambiente atual.
 
 #### Scan de imagens no ACR
 
@@ -184,21 +190,110 @@ O Defender integra com Azure Policy para impedir que o OpenShift faça pull de i
 
 **O que isso resolve na prática:** um CVE pode ser descoberto dias ou semanas após o push de uma imagem. Sem Azure Policy, a imagem vulnerável continua disponível para pull normalmente. Com a policy ativa, assim que o Defender classifica a imagem como vulnerável, novos pulls são negados — mesmo sem recriar o CI.
 
-#### Runtime protection no OpenShift
+### 2.5 Assinatura de imagens com cosign + validação Kyverno
 
-O Defender monitora o comportamento dos containers em execução e gera alertas para:
+A assinatura de imagens resolve um problema que nem o trivy nem o Defender cobrem: **garantir que apenas imagens produzidas pelo seu CI autorizado chegam ao cluster** — e não imagens construídas manualmente, empurradas por um pipeline comprometido ou trazidas de fora do ACR.
 
-| Alerta | O que detecta |
+#### Como funciona
+
+```
+CI conclui build + trivy passa
+          │
+          ▼
+cosign sign -- com chave privada do CI
+          │
+          ▼
+Assinatura armazenada no ACR junto à imagem
+(como artefato OCI separado da imagem)
+          │
+          ▼
+GitHub Actions faz deploy → OpenShift recebe o pod
+          │
+          ▼
+Kyverno intercepta o request de criação do pod
+Chama ACR para verificar a assinatura cosign
+com a chave pública configurada na policy
+          │
+    ┌─────┴─────┐
+    │           │
+ Válida      Inválida ou ausente
+    │           │
+    ▼           ▼
+ Pod sobe   Pod BLOQUEADO
+            Evento registrado no audit log
+```
+
+#### Step de assinatura no GitHub Actions
+
+```yaml
+- name: Login no ACR
+  uses: azure/docker-login@v1
+  with:
+    login-server: myacr.azurecr.io
+    username: ${{ secrets.ACR_USERNAME }}
+    password: ${{ secrets.ACR_PASSWORD }}
+
+- name: Build e push da imagem
+  run: |
+    docker build -t myacr.azurecr.io/base/ubi8:${{ env.TAG }} .
+    docker push myacr.azurecr.io/base/ubi8:${{ env.TAG }}
+
+- name: Assinar imagem com cosign
+  env:
+    COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+    COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+  run: |
+    cosign sign --key env://COSIGN_PRIVATE_KEY \
+      myacr.azurecr.io/base/ubi8:${{ env.TAG }}
+```
+
+> A chave privada fica em GitHub Secrets. A chave pública correspondente é distribuída para o Kyverno via ConfigMap ou Secret no cluster.
+
+#### Policy Kyverno — validação de assinatura
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signature
+  annotations:
+    policies.kyverno.io/description: >
+      Bloqueia pods com imagens não assinadas pelo CI autorizado.
+      Garante que apenas imagens produzidas pelo pipeline
+      oficial chegam ao cluster.
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: check-cosign-signature
+      match:
+        resources:
+          kinds:
+            - Pod
+      verifyImages:
+        - imageReferences:
+            - "myacr.azurecr.io/*"
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      <chave pública cosign do CI>
+                      -----END PUBLIC KEY-----
+```
+
+#### O que esta policy garante
+
+| Cenário | Resultado |
 |---|---|
-| Processo suspeito em container | Shell inesperado, netcat, curl para IPs externos |
-| Escalonamento de privilégio | Container tentando obter root no host |
-| Drift de imagem | Container executando binários não presentes na imagem original |
-| Conexão com IP malicioso | Comunicação com IPs em listas de threat intelligence |
-| Acesso a segredos do Kubernetes | Pod lendo secrets de outros namespaces |
+| Imagem construída e assinada pelo CI | Pod sobe normalmente |
+| Imagem do ACR sem assinatura (push manual) | Pod bloqueado |
+| Imagem de registry externo | Pod bloqueado (pela policy de ACR + por falta de assinatura) |
+| Imagem assinada com chave diferente (pipeline comprometido) | Pod bloqueado |
+| Imagem com assinatura expirada ou corrompida | Pod bloqueado |
 
-Esses alertas alimentam o portal do Defender e podem ser encaminhados para SIEM via integração com Azure Sentinel.
+> **Complementaridade com Azure Policy:** o Azure Policy bloqueia o **pull** de imagens com CVE no ACR. O Kyverno verifyImages bloqueia o **admission** de imagens sem assinatura válida no cluster. São dois gates independentes em camadas diferentes.
 
-### 2.5 Quando cada ferramenta detecta o problema
+### 2.6 Quando cada ferramenta detecta o problema
 
 O mesmo CVE pode ser detectado em momentos diferentes dependendo de quando foi publicado:
 

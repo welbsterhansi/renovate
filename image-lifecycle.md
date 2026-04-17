@@ -85,6 +85,52 @@ Este documento foi elaborado com base nas seguintes referências normativas e fr
 
 Toda imagem em execução no OpenShift percorre obrigatoriamente esta cadeia. Não existe atalho — imagens externas são bloqueadas pelo cluster.
 
+#### Por que duas camadas de imagem?
+
+A cadeia é dividida em dois níveis deliberadamente: **imagens pai** (base-images) e **imagens filhas** (dev repos). Essa separação existe por uma razão de governança — centralizar o controle de segurança em um único ponto sem bloquear a autonomia dos times de desenvolvimento.
+
+Sem essa hierarquia, cada time de dev seria responsável por monitorar o ciclo do Red Hat, interpretar CVEs de UBI e decidir quando atualizar sua base. Com ela, o Platform Team absorve esse trabalho e os times de dev herdam as atualizações automaticamente — sem precisar acompanhar o `registry.redhat.io`.
+
+O efeito prático é direto: um CVE crítico em UBI 8 gera **um único PR** no `base-images`. Quando o Platform Team aprova e o CI empurra a nova tag para o ACR, o Renovate automaticamente detecta a nova tag e abre PRs em **todos os repos de dev** que usam aquela base. A correção se propaga para toda a organização sem coordenação manual.
+
+#### Nível 1 — Imagens pai (base-images)
+
+O `base-images` é o repositório central do Platform Team. É aqui que vivem os Dockerfiles das imagens base da organização — construídas sobre as imagens oficiais Red Hat UBI.
+
+**Fluxo:**
+1. Red Hat publica uma nova tag no `registry.redhat.io` (ex: `ubi8:8.10-1234`)
+2. Renovate detecta a nova tag e abre um PR no `base-images` com a atualização do `FROM`
+3. O Platform Team revisa e aprova o PR — patches e minors podem ter automerge; majors exigem aprovação explícita
+4. O CI executa: `hadolint` valida o Dockerfile, `trivy` escaneia a imagem construída (gate: CVE crítico bloqueia o push)
+5. Se aprovado: push da nova tag no ACR (`myacr.azurecr.io/base/ubi8:2.1`)
+6. `cosign sign` assina a imagem — a assinatura fica armazenada no ACR junto com o manifest
+
+O Platform Team **não aprova CVEs** — aprova o Dockerfile e a tag. A decisão de segurança é delegada ao `trivy` no CI e ao Defender for Cloud no ACR.
+
+#### Nível 2 — Imagens filhas (dev repos)
+
+Os repos de desenvolvimento constroem suas imagens usando as imagens pai do ACR como base — nunca diretamente do `registry.redhat.io`. O `hadolint` enforça isso no CI.
+
+**Fluxo:**
+1. Renovate detecta a nova tag da imagem pai no ACR e abre um PR no repo de dev com a atualização do `FROM`
+2. O time de dev revisa — patches e minors com automerge disponível; majors exigem aprovação
+3. CI executa: `hadolint` valida que o `FROM` aponta para o ACR interno, `trivy` escaneia a imagem filha
+4. Push da nova tag no ACR (`myacr.azurecr.io/apps/app:1.4`)
+5. `cosign sign` assina a imagem filha
+6. GitHub Actions faz deploy no OpenShift ARO
+
+#### Controles de segurança na cadeia
+
+Os três controles que atuam horizontalmente em toda a cadeia:
+
+| Controle | Onde atua | O que garante |
+|---|---|---|
+| **hadolint** | CI — antes do build | `FROM` aponta apenas para o ACR interno; nenhuma imagem de registry externo entra |
+| **Defender for Cloud** | ACR — após o push | Scan profundo async; Azure Policy bloqueia pull de imagens com CVE crítico ativo |
+| **Kyverno** | OpenShift — admission | Valida assinatura cosign antes de admitir qualquer pod; bloqueia imagens não-ACR no cluster |
+
+Nenhum dos três depende do outro — são camadas independentes. Se o `trivy` falhar em detectar um CVE no CI, o Defender pega no ACR. Se uma imagem passar pelo Defender sem assinatura válida, o Kyverno bloqueia no cluster. A sobreposição é intencional.
+
 ```mermaid
 %%{init: {'theme': 'default', 'themeVariables': {'background': '#ffffff', 'mainBkg': '#ffffff'}}}%%
 flowchart TD
@@ -138,14 +184,17 @@ Cada imagem — pai ou filha — passa pelos seguintes stages ao longo de sua vi
 flowchart LR
     C["CRIAÇÃO"]
     U["USO ATIVO"]
-    R["REMEDIAÇÃO\nse CVE detectado"]
-    D["DEPRECAÇÃO"]
-    E["EOL"]
+    R["REMEDIAÇÃO\nnova tag · rebuild · deploy\nscan limpo = retorno"]
+    W["WAIVER\nCVE sem fix disponível\ndata de revisão documentada"]
+    D["DEPRECAÇÃO\nsubstituída por versão\nmais nova ou EOL do fornecedor"]
+    E["EOL\nfornecedor encerrou\nsuporte de segurança"]
     EXP["EXPURGO\ntags antigas no ACR\nkeep 5 dev/qa · keep 10 prod\nmáx 60 dias"]
 
     C --> U
-    U --> R
-    R -->|"CVE corrigido\nvolta ao uso ativo"| U
+    U -->|"CVE crítico\ndetectado"| R
+    R -->|"CVE corrigido\n+ scan limpo"| U
+    R -->|"sem fix\ndisponível"| W
+    W -->|"fix\ndisponível"| R
     U --> D
     D --> E
 
@@ -155,14 +204,60 @@ flowchart LR
     style C fill:#2d833b,color:#fff,stroke:#1a5c28
     style U fill:#0072c6,color:#fff,stroke:#005a9e
     style R fill:#e67e00,color:#fff,stroke:#b36200
+    style W fill:#d4a017,color:#fff,stroke:#a37c10
     style D fill:#8e44ad,color:#fff,stroke:#6c3483
     style E fill:#c0392b,color:#fff,stroke:#922b21
     style EXP fill:#555,color:#fff,stroke:#333
 ```
 
-> **Remediação não é um stage terminal** — uma imagem pode passar por múltiplos ciclos de remediação durante o uso ativo antes de chegar à deprecação.
->
-> **Expurgo acontece em dois momentos** — continuamente durante o uso ativo (tags antigas além do keep) e na saída do EOL (remoção total após confirmar zero workloads no cluster.
+#### Remediação — como funciona na prática
+
+**O que dispara:** Um CVE crítico é detectado pelo Defender for Cloud (scan async no ACR, contínuo) ou pelo trivy (gate no CI durante um novo build). Ambos produzem alertas com CVE ID, severidade, camada afetada e disponibilidade de fix.
+
+**O processo de remediação:**
+
+1. Defender ou trivy identificam CVE crítico na imagem em uso
+2. Se a base foi atualizada pelo Renovate → já existe PR aberto com a correção; o time aprova e faz merge
+3. Se não existe PR → o time abre manualmente apontando para a nova tag da imagem pai
+4. CI rebuild: nova tag é construída, trivy gate roda, se limpo faz push no ACR com nova tag
+5. Cosign assina a nova imagem no ACR
+6. Deploy no OpenShift com a nova tag
+7. Defender confirma scan limpo na nova imagem → remediação fechada
+
+**Critério de fechamento:** deploy da nova tag confirmado no cluster **e** Defender for Cloud sem alertas críticos ativos na imagem. Não basta o rebuild — a confirmação do Defender fecha o ciclo.
+
+**CVE sem fix disponível — Waiver:**
+Quando o CVE crítico não tem patch publicado pelo fornecedor (`ignore-unfixed: true` no trivy), a imagem entra em **Waiver**. O waiver exige:
+- Justificativa documentada (CVE ID, motivo da ausência de fix, mitigações compensatórias em vigor)
+- Data máxima de revisão (recomendado: 30 dias)
+- Aprovação explícita do time de segurança
+
+O waiver não é aceitação permanente — é um prazo controlado. Quando o fix for publicado, a imagem retorna ao fluxo de remediação.
+
+#### EOL — origem e referências
+
+EOL (**End of Life**) marca o ponto em que o fornecedor da imagem base encerra o suporte de segurança. A partir do EOL, CVEs descobertos na versão não recebem mais patches — tornar-se vulnerabilidades permanentes e não remediáveis.
+
+**De onde vem o EOL das suas imagens:**
+
+| Imagem base | Fonte do EOL | Exemplo |
+|---|---|---|
+| Red Hat UBI 8 | [Red Hat Product Life Cycle](https://access.redhat.com/product-life-cycle) | RHEL 8 → Maio 2029 |
+| Red Hat UBI 9 | Red Hat Product Life Cycle | RHEL 9 → Maio 2032 |
+| UBI minimal / micro | Mesmo ciclo da versão RHEL correspondente | Herda da versão pai |
+
+O Renovate monitora as tags publicadas pelo fornecedor mas **não sabe que uma versão atingiu EOL** — isso é um dado publicado pela Red Hat fora das tags de imagem. O controle de EOL é responsabilidade manual do time, com revisão periódica das datas publicadas.
+
+**Referências normativas:**
+
+- **NIST SP 800-190 §4.1** — recomenda explicitamente o uso de imagens provenientes de fontes ativamente mantidas; imagens EOL violam este requisito
+- **ISO 27001 A.12.6.1** — Gestão de vulnerabilidades técnicas: software fora de suporte é tratado como vulnerabilidade técnica. Uma imagem EOL equivale a uma vulnerabilidade sem possibilidade de remediação — situação que a norma exige que seja gerida e documentada
+- **CIS Kubernetes Benchmark 5.1.1** — use only approved base images, que implicitamente exclui versões sem suporte ativo do fornecedor
+
+**O que fazer quando uma imagem pai atinge EOL:**
+A imagem entra em **Deprecação** imediatamente. Todos os repos de dev que a usam como base devem migrar para a versão suportada seguinte (ex: UBI 8 → UBI 9) antes da data de EOL. O Renovate não abre esse PR automaticamente porque é uma mudança de major version — exige aprovação explícita via `dependencyDashboardApproval: true`.
+
+> **Expurgo acontece em dois momentos** — continuamente durante o uso ativo (tags antigas além do keep) e na saída do EOL (remoção total após confirmar zero workloads no cluster).
 
 ---
 

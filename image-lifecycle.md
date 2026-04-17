@@ -248,6 +248,63 @@ EOL (**End of Life**) marca o ponto em que o fornecedor da imagem base encerra o
 
 O Renovate monitora as tags publicadas pelo fornecedor mas **não sabe que uma versão atingiu EOL** — isso é um dado publicado pela Red Hat fora das tags de imagem. O controle de EOL é responsabilidade manual do time, com revisão periódica das datas publicadas.
 
+**O Defender for Cloud detecta EOL?**
+
+Sim — mas de forma **reactiva**. Quando uma imagem base atinge EOL, o Defender (via Microsoft Defender Vulnerability Management) classifica o próprio OS da imagem como uma finding de vulnerabilidade. No portal do Defender for Cloud aparece como recomendação do tipo _"Container images should not use an end-of-life OS"_.
+
+O problema desta detecção é que ela ocorre **depois que o EOL chegou**, não antes. Não há garantia de SLA sobre quanto tempo demora entre o EOL oficial publicado pela Red Hat e a atualização da base de dados do Defender. Para fins de compliance (ISO 27001 A.12.6.1), confiar exclusivamente no Defender para detetar EOL é um risco — a imagem pode estar em violação por semanas antes de aparecer como finding.
+
+**Detecção proactiva — GitHub Actions com alerta de 90 dias:**
+
+A abordagem correcta é combinar o Defender (detecção reactiva) com um workflow de cron semanal que verifica as datas de EOL conhecidas e emite alerta com antecedência suficiente para o time planear a migração antes de entrar em violação:
+
+```yaml
+# .github/workflows/check-image-eol.yml
+name: Check Image EOL
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # toda segunda-feira às 09h
+  workflow_dispatch:
+
+jobs:
+  check-eol:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar datas de EOL das imagens base
+        run: |
+          # Atualizar estas datas conforme Red Hat Product Life Cycle
+          # https://access.redhat.com/product-life-cycle
+          declare -A EOL_DATES=(
+            ["UBI8"]="2029-05-31"
+            ["UBI9"]="2032-05-31"
+          )
+
+          TODAY=$(date +%Y-%m-%d)
+          WARN_THRESHOLD=$(date -d "+90 days" +%Y-%m-%d)
+          FOUND_ISSUE=false
+
+          for IMAGE in "${!EOL_DATES[@]}"; do
+            EOL="${EOL_DATES[$IMAGE]}"
+
+            if [[ "$TODAY" > "$EOL" ]]; then
+              echo "::error::$IMAGE atingiu EOL em $EOL — migração obrigatória imediata"
+              FOUND_ISSUE=true
+            elif [[ "$WARN_THRESHOLD" > "$EOL" ]]; then
+              echo "::warning::$IMAGE atinge EOL em $EOL — menos de 90 dias restantes"
+              FOUND_ISSUE=true
+            else
+              echo "✅ $IMAGE — EOL em $EOL (OK)"
+            fi
+          done
+
+          if [ "$FOUND_ISSUE" = true ]; then
+            exit 1  # falha o workflow → GitHub notifica via email e cria alerta no repo
+          fi
+```
+
+> **Importante:** As datas no workflow são estáticas — precisam ser atualizadas manualmente quando a Red Hat publicar novos ciclos, ou quando uma nova versão de UBI for adoptada. Recomenda-se rever este arquivo a cada novo ano fiscal.
+
 **Referências normativas:**
 
 - **NIST SP 800-190 §4.1** — recomenda explicitamente o uso de imagens provenientes de fontes ativamente mantidas; imagens EOL violam este requisito

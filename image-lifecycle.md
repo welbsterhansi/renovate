@@ -6,6 +6,65 @@
 
 ---
 
+## Referências e Conformidade com Frameworks
+
+Este documento foi elaborado com base nas seguintes referências normativas e frameworks de segurança. O mapeamento indica quais seções deste documento atendem a cada controle.
+
+### ISO/IEC 27001:2022
+
+| Controle | Descrição | Seção deste documento | Conformidade |
+|---|---|---|---|
+| A.8.1 | Inventário de ativos | 3.3 — Uso ativo, auditoria de imagens em execução | ✅ Atendido |
+| A.12.4 | Logging e monitoramento | — | ⚠️ Lacuna — sem política de retenção de logs |
+| A.12.5.1 | Controle de software em produção | 6 — Enforcement (Kyverno, cosign) | ✅ Atendido |
+| A.12.6.1 | Gestão de vulnerabilidades técnicas | 5 — SLAs de remediação, fluxo completo | ✅ Atendido |
+| A.14.2.1 | Segurança no desenvolvimento | 3 — Gates de CI, trivy, GHAS | ✅ Atendido |
+| A.14.2.5 | Princípios de engenharia segura | 2 — Camadas de segurança | ✅ Atendido |
+| A.17.1 | Continuidade de segurança da informação | 9 — Runbooks | ✅ Atendido |
+
+### NIST SP 800-190 — Application Container Security Guide
+
+| Seção NIST | Descrição | Seção deste documento | Conformidade |
+|---|---|---|---|
+| 4.1 | Vulnerabilidades em imagens | 5 — Gestão de vulnerabilidades | ✅ Atendido |
+| 4.2 | Configuração incorreta de imagens | 3.1, 3.2 — Gates de CI, Dockerfile validation | ✅ Atendido |
+| 4.3 | Malware embarcado | 2.2 (GHAS), 2.3 (trivy) | ✅ Atendido |
+| 4.4 | Segredos em texto claro | 2.2 — GHAS secret scanning | ✅ Atendido |
+| 4.5 | Uso de imagens não confiáveis | 2.5 — cosign + Kyverno verifyImages | ✅ Atendido |
+| 5.1 | Acesso irrestrito ao cluster | 6 — Kyverno policies, ACR-only | ✅ Atendido |
+| 6.1 | Runtime security | — | ⚠️ Gap conhecido — Defender runtime não suportado no OpenShift ARO. Mitigado por Azure Policy (pull-time) e Kyverno (admission). |
+
+### CIS Kubernetes Benchmark
+
+| Controle CIS | Descrição | Seção deste documento | Conformidade |
+|---|---|---|---|
+| 4.1 | Imagens devem ser escaneadas | 2.3 (trivy), 2.4 (Defender) | ✅ Atendido |
+| 4.2 | Imagens devem ser atualizadas | `readme.md` — Renovate Bot | ✅ Atendido |
+| 4.6 | Imagens não devem ser modificadas em runtime | 2.5 — cosign + Kyverno verifyImages | ✅ Atendido |
+| 4.7 | Apenas imagens autorizadas devem ser usadas | 6.1 — Kyverno ACR-only policy | ✅ Atendido |
+| 5.1 | Evitar sprawl de imagens (image sprawl) | 4 — Expurgo de imagens no ACR | ✅ Atendido |
+
+### SLSA — Supply Chain Levels for Software Artifacts
+
+| Nível | Requisito | Implementação | Conformidade |
+|---|---|---|---|
+| L1 | Build via processo automatizado e documentado | GitHub Actions | ✅ Atendido |
+| L2 | Build service hospedado + provenance básico | GitHub Actions + cosign sign | ✅ Atendido |
+| L3 | Integridade de source e build, assinatura verificável | cosign + Kyverno verifyImages | ✅ Atendido |
+| L3 | SBOM — Software Bill of Materials | — | ⚠️ Lacuna — SBOM não gerado no pipeline CI |
+
+### Resumo de lacunas identificadas
+
+| # | Lacuna | Framework | Impacto | Recomendação |
+|---|---|---|---|---|
+| 1 | Sem política de retenção de logs de auditoria (Kyverno, GitHub Actions, ACR) | ISO 27001 A.12.4 | Médio — dificulta auditoria forense | Definir retenção mínima de 90 dias para logs de CI e eventos Kyverno |
+| 2 | Sem runtime security no cluster | NIST 800-190 6.1 | Médio — comportamento anômalo de containers não é detectado em tempo real | Gap conhecido e documentado. Limitação do OpenShift ARO. Reavaliar quando suporte Defender for ARO for disponibilizado pela Microsoft |
+| 3 | Sem geração de SBOM no pipeline CI | SLSA L3 | Baixo — reduz rastreabilidade de componentes por imagem | Adicionar step `syft` ou `trivy sbom` ao pipeline para gerar e armazenar SBOM no ACR como artefato OCI |
+
+---
+
+---
+
 ## Índice
 
 1. [Visão Geral do Ciclo de Vida](#1-visão-geral-do-ciclo-de-vida)

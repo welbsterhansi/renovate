@@ -68,8 +68,8 @@ Toda imagem em execução no OpenShift percorre obrigatoriamente esta cadeia. N�
                    ▼
   ┌──────────────────────────────────────┐
   │  OpenShift ARO                      │◀── Kyverno verifyImages:
-  │  Workloads em execução              │    bloqueia pod se imagem não
-  │                                     │    tiver assinatura cosign válida
+  │  Workloads em execução              │    bloqueia pod sem assinatura
+  │                                     │    cosign válida do CI
   └──────────────────────────────────────┘◀── Kyverno: bloqueia imagens
                                               fora do ACR
 ```
@@ -308,9 +308,10 @@ CVE publicado DEPOIS do push (imagem já no ACR):
   → Trivy confirma no CI do PR de fix antes do novo push
 
 CVE publicado DEPOIS do deploy (container em execução):
-  → Defender runtime detecta comportamento anômalo
-  → Alerta gerado — investigação manual
-  → Parallel: Renovate abre PR de patch quando disponível
+  → Sem detecção automática em runtime (Defender agents não disponíveis no ARO)
+  → Defender detecta na varredura contínua do ACR e Azure Policy bloqueia novos pulls
+  → Kyverno bloqueia novos pods com a imagem vulnerável no admission
+  → Renovate abre PR de patch quando Red Hat publicar fix
 ```
 
 ---

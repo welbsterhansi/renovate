@@ -9,13 +9,14 @@
 ## Índice
 
 1. [Visão Geral do Ciclo de Vida](#1-visão-geral-do-ciclo-de-vida)
-2. [Stages de uma Imagem](#2-stages-de-uma-imagem)
-3. [Expurgo de Imagens no ACR](#3-expurgo-de-imagens-no-acr)
-4. [Gestão de Vulnerabilidades](#4-gestão-de-vulnerabilidades)
-5. [Enforcement no OpenShift](#5-enforcement-no-openshift)
-6. [Forçar Atualização nos Repos de Dev](#6-forçar-atualização-nos-repos-de-dev)
-7. [Papéis e Responsabilidades](#7-papéis-e-responsabilidades)
-8. [Runbooks](#8-runbooks)
+2. [Camadas de Segurança](#2-camadas-de-segurança)
+3. [Stages de uma Imagem](#3-stages-de-uma-imagem)
+4. [Expurgo de Imagens no ACR](#4-expurgo-de-imagens-no-acr)
+5. [Gestão de Vulnerabilidades](#5-gestão-de-vulnerabilidades)
+6. [Enforcement no OpenShift](#6-enforcement-no-openshift)
+7. [Forçar Atualização nos Repos de Dev](#7-forçar-atualização-nos-repos-de-dev)
+8. [Papéis e Responsabilidades](#8-papéis-e-responsabilidades)
+9. [Runbooks](#9-runbooks)
 
 ---
 
@@ -31,45 +32,43 @@ Toda imagem em execução no OpenShift percorre obrigatoriamente esta cadeia. N�
          │  Renovate monitora e abre PR no base-images
          ▼
   ┌──────────────────────────────────────┐
-  │  base-images (GitHub)               │
-  │  Equipe de Plataforma revisa e      │
+  │  base-images (GitHub)               │◀── GHAS: dependency review,
+  │  Equipe de Plataforma revisa e      │    secret scanning, CodeQL
   │  mergea o PR                        │
-  │  CI: build + scan + validate        │
+  │  CI: trivy (gate) + validate        │◀── trivy bloqueia push se CVE crítico
   └────────────────┬─────────────────────┘
                    │
                    │  CI faz push da imagem pai
                    ▼
   ┌──────────────────────────────────────┐
-  │  ACR — imagens pai                  │
-  │  ex: myacr.azurecr.io/base/ubi8:2.1 │
+  │  ACR — imagens pai                  │◀── Defender for Cloud: scan profundo
+  │  ex: myacr.azurecr.io/base/ubi8:2.1 │    assíncrono após cada push
   └────────────────┬─────────────────────┘
                    │
                    │  Renovate detecta nova tag no ACR
                    │  e abre PR nos repos de dev
                    ▼
   ┌──────────────────────────────────────┐
-  │  repos de dev (GitHub)              │
-  │  Dev aprova PR (patch/minor: auto)  │
-  │  CI: build + scan da imagem filha   │
+  │  repos de dev (GitHub)              │◀── GHAS: dependency review,
+  │  Dev aprova PR (patch/minor: auto)  │    secret scanning
+  │  CI: trivy (gate)                   │◀── trivy bloqueia push se CVE crítico
   └────────────────┬─────────────────────┘
                    │
                    │  CI faz push da imagem filha
                    ▼
   ┌──────────────────────────────────────┐
-  │  ACR — imagens filhas               │
-  │  ex: myacr.azurecr.io/apps/minha-   │
-  │  app:1.4.2                          │
-  └────────────────┬─────────────────────┘
+  │  ACR — imagens filhas               │◀── Defender for Cloud: scan profundo
+  │  ex: myacr.azurecr.io/apps/app:1.4  │    Azure Policy: bloqueia pull
+  └────────────────┬─────────────────────┘    se CVE crítico ativo
                    │
                    │  GitHub Actions faz deploy
                    │  (futuro: ArgoCD sync)
                    ▼
   ┌──────────────────────────────────────┐
-  │  OpenShift                          │
-  │  Workloads em execução              │
-  │  Scan contínuo + enforcement        │
-  │  Kyverno                            │
-  └──────────────────────────────────────┘
+  │  OpenShift                          │◀── Defender runtime: monitora
+  │  Workloads em execução              │    comportamento dos containers
+  │  Kyverno: enforcement de políticas  │◀── Kyverno: bloqueia imagens
+  └──────────────────────────────────────┘    fora do ACR
 ```
 
 ### 1.2 Stages do ciclo de vida
@@ -93,9 +92,137 @@ Cada imagem — pai ou filha — passa pelos seguintes stages ao longo de sua vi
 
 ---
 
-## 2. Stages de uma Imagem
+## 2. Camadas de Segurança
 
-### 2.1 Criação — imagem pai
+O modelo usa três ferramentas complementares que atuam em momentos diferentes do ciclo. Nenhuma substitui a outra — cada uma cobre um ponto cego das demais.
+
+### 2.1 Visão geral das camadas
+
+| Momento | Ferramenta | O que faz | Bloqueia? |
+|---|---|---|---|
+| PR aberto (GitHub) | GHAS | Dependency review, secret scanning, CodeQL | Sim — bloqueia merge |
+| CI executa (antes do push) | trivy | Gate rápido de CVE crítico em imagem | Sim — bloqueia push |
+| Após push no ACR | Defender for Cloud | Scan profundo e contínuo das imagens | Sim — via Azure Policy |
+| Pull pelo OpenShift | Azure Policy + Defender | Bloqueia pull de imagens com CVE ativo | Sim — 403 no pull |
+| Containers em execução | Defender runtime | Comportamento suspeito, escalonamento | Alerta + resposta |
+
+### 2.2 GHAS — GitHub Advanced Security
+
+O GHAS atua na camada do repositório GitHub — antes de qualquer build ou push. Cobre três frentes:
+
+**Dependency Review:** analisa o diff de cada PR e bloqueia merge se introduzir dependência com CVE conhecida. No contexto de Dockerfiles, complementa o Renovate — enquanto o Renovate garante que você está na versão mais recente, o GHAS garante que o PR não está introduzindo uma dependência vulnerável ao lado.
+
+**Secret Scanning:** detecta credenciais expostas em commits — tokens, chaves de API, senhas em Dockerfiles ou scripts de CI. Alerta imediatamente e pode bloquear o push.
+
+**Code Scanning (CodeQL):** análise estática do código fonte da aplicação. Mais relevante nos repos de dev que têm código além do Dockerfile.
+
+```yaml
+# .github/workflows/ghas.yml — já habilitado automaticamente
+# com GHAS pago, basta garantir que está ativo nas configurações do repo:
+# Settings → Code security and analysis → Enable all
+```
+
+> **Importante:** GHAS não escaneia a imagem Docker construída — escaneia o código fonte e as dependências declaradas. O scan da imagem em si é responsabilidade do trivy (CI) e do Defender (ACR).
+
+### 2.3 trivy — gate no CI
+
+O trivy roda dentro do pipeline de CI exclusivamente como **gate de build-time**. Sua função é simples: se a imagem construída tem CVE crítico, o pipeline falha e o push no ACR não acontece.
+
+```yaml
+# Exemplo de step no GitHub Actions
+- name: Scan de segurança com trivy
+  uses: aquasecurity/trivy-action@master
+  with:
+    image-ref: myacr.azurecr.io/base/ubi8:${{ env.TAG }}
+    severity: CRITICAL
+    exit-code: 1          # falha o pipeline se encontrar CVE crítico
+    ignore-unfixed: true  # ignora CVEs sem patch disponível
+```
+
+O trivy não é o scanner principal de observabilidade — ele é o freio de emergência antes do push. Scans contínuos e de longo prazo são responsabilidade do Defender.
+
+### 2.4 Microsoft Defender for Cloud
+
+O Defender opera em duas camadas distintas após o push:
+
+#### Scan de imagens no ACR
+
+Toda imagem empurrada para o ACR é automaticamente escaneada pelo Defender — sem configuração adicional no CI. O resultado aparece no portal do Defender for Cloud com:
+- Lista de CVEs por severidade
+- Camada da imagem onde o CVE está presente
+- Disponibilidade de fix
+- Score de risco agregado
+
+Isso cria uma **segunda opinião independente** do trivy. Se os dois discordarem sobre um CVE, você tem evidência de duas fontes para a decisão de waiver ou remediação.
+
+#### Azure Policy — bloqueio de pull
+
+O Defender integra com Azure Policy para impedir que o OpenShift faça pull de imagens com CVEs críticos ativos — mesmo que a imagem já esteja no ACR:
+
+```json
+{
+  "displayName": "Bloquear pull de imagens com vulnerabilidades críticas",
+  "policyRule": {
+    "if": {
+      "allOf": [
+        {
+          "field": "type",
+          "equals": "Microsoft.ContainerRegistry/registries/images"
+        },
+        {
+          "field": "Microsoft.Security/assessments/status/code",
+          "equals": "Unhealthy"
+        }
+      ]
+    },
+    "then": {
+      "effect": "deny"
+    }
+  }
+}
+```
+
+**O que isso resolve na prática:** um CVE pode ser descoberto dias ou semanas após o push de uma imagem. Sem Azure Policy, a imagem vulnerável continua disponível para pull normalmente. Com a policy ativa, assim que o Defender classifica a imagem como vulnerável, novos pulls são negados — mesmo sem recriar o CI.
+
+#### Runtime protection no OpenShift
+
+O Defender monitora o comportamento dos containers em execução e gera alertas para:
+
+| Alerta | O que detecta |
+|---|---|
+| Processo suspeito em container | Shell inesperado, netcat, curl para IPs externos |
+| Escalonamento de privilégio | Container tentando obter root no host |
+| Drift de imagem | Container executando binários não presentes na imagem original |
+| Conexão com IP malicioso | Comunicação com IPs em listas de threat intelligence |
+| Acesso a segredos do Kubernetes | Pod lendo secrets de outros namespaces |
+
+Esses alertas alimentam o portal do Defender e podem ser encaminhados para SIEM via integração com Azure Sentinel.
+
+### 2.5 Quando cada ferramenta detecta o problema
+
+O mesmo CVE pode ser detectado em momentos diferentes dependendo de quando foi publicado:
+
+```
+CVE publicado ANTES do push:
+  → trivy detecta no CI → push bloqueado → imagem nunca chega ao ACR
+
+CVE publicado DEPOIS do push (imagem já no ACR):
+  → Defender detecta na varredura contínua do ACR
+  → Azure Policy bloqueia novos pulls
+  → Renovate abre PR de patch quando Red Hat publicar fix
+  → Trivy confirma no CI do PR de fix antes do novo push
+
+CVE publicado DEPOIS do deploy (container em execução):
+  → Defender runtime detecta comportamento anômalo
+  → Alerta gerado — investigação manual
+  → Parallel: Renovate abre PR de patch quando disponível
+```
+
+---
+
+## 3. Stages de uma Imagem
+
+### 3.1 Criação — imagem pai
 
 Uma nova imagem pai nasce quando:
 - O Renovate detecta nova versão no `registry.redhat.io` e abre PR no `base-images`
@@ -113,7 +240,7 @@ Uma nova imagem pai nasce quando:
 
 Somente após todos os gates e o merge do PR o CI faz push da imagem pai para o ACR.
 
-### 2.2 Criação — imagem filha
+### 3.2 Criação — imagem filha
 
 Uma imagem filha nasce quando o Renovate detecta a nova tag da imagem pai no ACR e abre PR no repo de dev. O fluxo difere do pai em dois pontos:
 
@@ -128,7 +255,7 @@ Uma imagem filha nasce quando o Renovate detecta a nova tag da imagem pai no ACR
 | `image-build` | Build bem-sucedido | Sim |
 | `image-scan` | Sem CVEs críticos | Sim |
 
-### 2.3 Uso ativo
+### 3.3 Uso ativo
 
 Após publicada no ACR e deployada no OpenShift, a imagem entra em uso ativo. Neste stage:
 
@@ -149,13 +276,13 @@ trivy image myacr.azurecr.io/base/ubi8:2.1 \
   --exit-code 1
 ```
 
-### 2.4 Remediação
+### 3.4 Remediação
 
 A remediação começa quando um CVE é detectado e termina somente quando o pod em execução no cluster é atualizado e re-scanado com resultado limpo. O merge do PR é um passo do processo, não o fim.
 
 O fluxo completo está detalhado na [seção 4](#4-gestão-de-vulnerabilidades).
 
-### 2.5 Deprecação
+### 3.5 Deprecação
 
 Uma imagem entra em deprecação quando:
 - A Red Hat anuncia EOL da versão base (ex: RHEL 8 → RHEL 9)
@@ -187,7 +314,7 @@ Dia 90+ → Remoção do ACR após confirmar zero workloads
            usando a imagem (ver seção 3.3)
 ```
 
-### 2.6 EOL e remoção do ACR
+### 3.6 EOL e remoção do ACR
 
 Antes de remover uma imagem do ACR, confirmar que nenhum workload a referencia:
 
@@ -201,11 +328,11 @@ Somente com resultado vazio executar a remoção. Documentar data e motivo na Is
 
 ---
 
-## 3. Expurgo de Imagens no ACR
+## 4. Expurgo de Imagens no ACR
 
 O ACR acumula tags ao longo do tempo — cada build gera uma nova tag. Sem expurgo, o ACR cresce indefinidamente, aumentando custos de storage e dificultando a auditoria de quais versões estão realmente em uso.
 
-### 3.1 Política de retenção
+### 4.1 Política de retenção
 
 | Ambiente | Tags mantidas por repositório | Idade máxima |
 |---|---|---|
@@ -214,7 +341,7 @@ O ACR acumula tags ao longo do tempo — cada build gera uma nova tag. Sem expur
 
 **Regra de ouro:** uma tag só pode ser expurgada se **não estiver em execução em nenhum pod do cluster**. Independentemente de quantas tags existam ou de sua idade, tags em uso são intocáveis.
 
-### 3.2 Lógica do expurgo
+### 4.2 Lógica do expurgo
 
 ```
 Para cada repositório no ACR:
@@ -228,7 +355,7 @@ Para cada repositório no ACR:
   6. Executar exclusão das marcadas
 ```
 
-### 3.3 Implementação com GitHub Actions agendado
+### 4.3 Implementação com GitHub Actions agendado
 
 ```yaml
 name: ACR Image Expurgo
@@ -322,7 +449,7 @@ jobs:
           done
 ```
 
-### 3.4 Auditoria antes do expurgo
+### 4.4 Auditoria antes do expurgo
 
 Antes de ativar o expurgo em modo destrutivo, rode em dry-run para validar o que seria removido:
 
@@ -335,9 +462,9 @@ Revisar o output do dry-run e confirmar que nenhuma imagem crítica está na lis
 
 ---
 
-## 4. Gestão de Vulnerabilidades
+## 5. Gestão de Vulnerabilidades
 
-### 4.1 SLAs de remediação por severidade
+### 5.1 SLAs de remediação por severidade
 
 | Severidade | CVSS | SLA de remediação | O que acontece se vencer |
 |---|---|---|---|
@@ -348,7 +475,7 @@ Revisar o output do dry-run e confirmar que nenhuma imagem crítica está na lis
 
 > **Detecção** conta a partir do momento em que o scan (CI ou agendado) identifica o CVE, não da publicação no NVD.
 
-### 4.2 Processo de remediação — fluxo completo
+### 5.2 Processo de remediação — fluxo completo
 
 A remediação **só termina quando o pod em execução no OpenShift é atualizado e re-scanado com resultado limpo**. O merge do PR é um passo intermediário, não o encerramento.
 
@@ -400,7 +527,7 @@ A remediação **só termina quando o pod em execução no OpenShift é atualiza
    - Evidência do scan limpo
 ```
 
-### 4.3 Exceções e waiver temporário
+### 5.3 Exceções e waiver temporário
 
 Se um time não consegue remediar dentro do SLA por bloqueio técnico legítimo (ex: incompatibilidade da aplicação com a versão patcheada), deve abrir uma Issue com:
 
@@ -414,9 +541,9 @@ Waivers não podem ultrapassar 30 dias para CVEs críticos.
 
 ---
 
-## 5. Enforcement no OpenShift
+## 6. Enforcement no OpenShift
 
-### 5.1 Política — somente imagens do ACR são permitidas
+### 6.1 Política — somente imagens do ACR são permitidas
 
 Nenhum workload no cluster deve executar imagens de registries externos. Toda imagem deve passar pelo pipeline do ACR e pelos gates de qualidade da organização.
 
@@ -451,7 +578,7 @@ spec:
 
 > **Modo de rollout:** Inicie com `validationFailureAction: Audit` para mapear violações existentes antes de ativar `Enforce`. Isso evita interrupções em workloads legados.
 
-### 5.2 Auditoria de imagens em execução no cluster
+### 6.2 Auditoria de imagens em execução no cluster
 
 **Listar todas as imagens e suas tags em execução:**
 
@@ -480,7 +607,7 @@ oc get pods -A -o jsonpath='{range .items[*]}{.spec.containers[*].image}{"\n"}{e
   | xargs -I{} trivy image {} --severity CRITICAL,HIGH --quiet
 ```
 
-### 5.3 Bloquear imagens com CVE crítico no admission
+### 6.3 Bloquear imagens com CVE crítico no admission
 
 Além de exigir que imagens venham do ACR, você pode bloquear imagens que não passaram no scan de segurança usando anotações no ACR integradas ao admission controller:
 
@@ -510,9 +637,9 @@ spec:
 
 ---
 
-## 6. Forçar Atualização nos Repos de Dev
+## 7. Forçar Atualização nos Repos de Dev
 
-### 6.1 Como o controle de major/minor/patch funciona sem quebrar apps
+### 7.1 Como o controle de major/minor/patch funciona sem quebrar apps
 
 O modelo de governança usa três mecanismos complementares para garantir que devs atualizem sem risco de quebrar aplicações:
 
@@ -524,7 +651,7 @@ O modelo de governança usa três mecanismos complementares para garantir que de
 
 Para major, o dev não é surpreendido — o PR existe mas fica congelado até que ele decida avaliar e aprovar. O prazo de 30 dias de aviso da equipe de Plataforma garante que nenhuma mudança de geração chega sem comunicação prévia.
 
-### 6.2 Fluxo de notificação antes do prazo
+### 7.2 Fluxo de notificação antes do prazo
 
 ```
 Dia 0   → Equipe de Plataforma mergea imagem pai major no base-images
@@ -539,7 +666,7 @@ Dia 30  → Prazo final — times que não migraram entram em
            enforcement ativo (ver 5.3)
 ```
 
-### 6.3 O que acontece se o dev não atualizar dentro do prazo
+### 7.3 O que acontece se o dev não atualizar dentro do prazo
 
 Quando o prazo de migração vence e um repo ainda executa a imagem depreciada/vulnerável no cluster, a equipe de Plataforma aplica enforcement progressivo:
 
@@ -561,7 +688,7 @@ Novos deploys com a imagem depreciada são **bloqueados pelo cluster**. Pods exi
 
 > **Importante:** O Enforce nunca derruba pods em execução imediatamente — apenas bloqueia novos deploys. Isso evita interrupções em produção enquanto o time migra.
 
-### 6.4 Controlar rollout de major sem quebrar apps
+### 7.4 Controlar rollout de major sem quebrar apps
 
 Para atualizações major que exigem mudanças na aplicação (ex: ubi8 → ubi9 com incompatibilidade de biblioteca), o processo recomendado é:
 
@@ -595,7 +722,7 @@ Para atualizações major que exigem mudanças na aplicação (ex: ubi8 → ubi9
 
 ---
 
-## 7. Papéis e Responsabilidades
+## 8. Papéis e Responsabilidades
 
 | Papel | Responsabilidades no ciclo de vida |
 |---|---|
@@ -605,7 +732,7 @@ Para atualizações major que exigem mudanças na aplicação (ex: ubi8 → ubi9
 | **Equipe de Segurança** | Define e revisa os SLAs de remediação. Aprova waivers de CVE crítico e alto. Monitora o relatório de violações do Kyverno. Realiza auditorias periódicas de imagens em produção. |
 | **Administrador do OpenShift** | Mantém e atualiza as políticas Kyverno/OPA no cluster. Gerencia o modo Audit → Enforce durante rollouts de enforcement. |
 
-### 7.1 Matriz RACI — decisões críticas
+### 8.1 Matriz RACI — decisões críticas
 
 | Decisão | Plataforma | Dev | Arquiteto | Segurança |
 |---|---|---|---|---|
@@ -622,9 +749,9 @@ Para atualizações major que exigem mudanças na aplicação (ex: ubi8 → ubi9
 
 ---
 
-## 8. Runbooks
+## 9. Runbooks
 
-### 8.1 CVE crítico descoberto em imagem em produção
+### 9.1 CVE crítico descoberto em imagem em produção
 
 **Sintomas:** Scan agendado ou alerta externo identifica CVE com CVSS ≥ 9.0 em imagem em execução no cluster.
 
@@ -658,7 +785,7 @@ Para atualizações major que exigem mudanças na aplicação (ex: ubi8 → ubi9
    → Registrar no histórico de incidentes
 ```
 
-### 8.2 Imagem base chegando ao EOL da Red Hat
+### 9.2 Imagem base chegando ao EOL da Red Hat
 
 **Trigger:** Anúncio de EOL no portal Red Hat ou alerta de fim de suporte no errata.
 
@@ -675,20 +802,20 @@ Para atualizações major que exigem mudanças na aplicação (ex: ubi8 → ubi9
    → PR passa por todos os gates de CI
    → Equipe de Plataforma valida compatibilidade
 
-4. Iniciar processo de deprecação (seção 2.5)
+4. Iniciar processo de deprecação (seção 3.5)
    → Issue com label deprecation
    → Prazo mínimo de 60 dias
    → Comunicação formal para todos os times
 
 5. Monitorar adoção
    → Relatório semanal de repos ainda na imagem depreciada
-   → Escalação progressiva (seção 6.3)
+   → Escalação progressiva (seção 7.3)
 
 6. Remoção do ACR somente após confirmar
    que nenhum workload usa a imagem depreciada
 ```
 
-### 8.3 Dev recusando atualização de major
+### 9.3 Dev recusando atualização de major
 
 **Cenário:** Time de dev não aprova PR de major no Dependency Dashboard e não abre Issue documentando o motivo.
 
@@ -715,7 +842,7 @@ Para atualizações major que exigem mudanças na aplicação (ex: ubi8 → ubi9
    para auditoria e aprendizado
 ```
 
-### 8.4 Imagem não autorizada detectada em execução no cluster
+### 9.4 Imagem não autorizada detectada em execução no cluster
 
 **Cenário:** Kyverno em modo Audit identifica pod usando imagem fora do ACR.
 
@@ -731,7 +858,7 @@ Para atualizações major que exigem mudanças na aplicação (ex: ubi8 → ubi9
    → Dar prazo para migração (máximo 30 dias para imagens em produção)
 
 4. Se a imagem tiver CVEs críticos:
-   → Tratar como incidente (runbook 8.1)
+   → Tratar como incidente (runbook 9.1)
    → Prazo reduzido para 24-72h
 
 5. Após migração, confirmar que o Kyverno não registra mais violações

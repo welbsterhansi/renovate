@@ -182,24 +182,24 @@ Cada imagem — pai ou filha — passa pelos seguintes stages ao longo de sua vi
 ```mermaid
 %%{init: {'theme': 'default', 'themeVariables': {'background': '#ffffff', 'mainBkg': '#ffffff'}}}%%
 flowchart LR
-    C["CRIAÇÃO"]
-    U["USO ATIVO"]
-    R["REMEDIAÇÃO\nnova tag · rebuild · deploy\nscan limpo = retorno"]
-    W["WAIVER\nCVE sem fix disponível\ndata de revisão documentada"]
-    D["DEPRECAÇÃO\nsubstituída por versão\nmais nova ou EOL do fornecedor"]
-    E["EOL\nfornecedor encerrou\nsuporte de segurança"]
-    EXP["EXPURGO\ntags antigas no ACR\nkeep 5 dev/qa · keep 10 prod\nmáx 60 dias"]
+    C["CREATE"]
+    U["ACTIVE USE"]
+    R["REMEDIATION\nrebuild · redeploy"]
+    W["WAIVER\nno fix available"]
+    D["DEPRECATION\nnewer version or EOL"]
+    E["EOL\nvendor support ended"]
+    EXP["EXPUNGE\nkeep 5 dev/qa\nkeep 10 prod\nmax 60 days"]
 
     C --> U
-    U -->|"CVE crítico\ndetectado"| R
-    R -->|"CVE corrigido\n+ scan limpo"| U
-    R -->|"sem fix\ndisponível"| W
-    W -->|"fix\ndisponível"| R
+    U -->|"critical CVE\ndetected"| R
+    R -->|"CVE fixed\n+ clean scan"| U
+    R -->|"no fix\navailable"| W
+    W -->|"fix\nreleased"| R
     U --> D
     D --> E
 
-    U -. "roda semanalmente\ntags fora do keep\ne sem uso no cluster" .-> EXP
-    E -. "remoção total\napós confirmar\nzero workloads" .-> EXP
+    U -. "weekly · unused tags\noutside keep policy" .-> EXP
+    E -. "full removal\nafter zero workloads\nconfirmed" .-> EXP
 
     style C fill:#2d833b,color:#fff,stroke:#1a5c28
     style U fill:#0072c6,color:#fff,stroke:#005a9e

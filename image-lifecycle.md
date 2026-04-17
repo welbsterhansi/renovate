@@ -89,27 +89,27 @@ Toda imagem em execução no OpenShift percorre obrigatoriamente esta cadeia. N�
 flowchart TD
     RH(["registry.redhat.io"])
 
-    BI["base-images — GitHub\nEquipe de Plataforma revisa e mergea o PR\nCI: build · scan · validate"]
+    BI["base-images — GitHub\nPlatform Team reviews and merges PR\nCI: build · scan · validate"]
 
-    ACRP["ACR — imagens pai\nmyacr.azurecr.io/base/ubi8:2.1\n+ assinatura cosign armazenada"]
+    ACRP["ACR — parent images\nmyacr.azurecr.io/base/ubi8:2.1\n+ cosign signature stored"]
 
-    DEV["repos de dev — GitHub\nDev aprova PR · patch e minor: automerge\nCI: build · scan · validate"]
+    DEV["dev repos — GitHub\nDev approves PR · patch and minor: automerge\nCI: build · scan · validate"]
 
-    ACRF["ACR — imagens filhas\nmyacr.azurecr.io/apps/app:1.4\n+ assinatura cosign armazenada"]
+    ACRF["ACR — child images\nmyacr.azurecr.io/apps/app:1.4\n+ cosign signature stored"]
 
-    OCP["OpenShift ARO\nWorkloads em execução"]
+    OCP["OpenShift ARO\nRunning Workloads"]
 
-    HADOLINT["hadolint\nvalida FROM no Dockerfile\nbloqueia registries externos no CI"]
+    HADOLINT["hadolint\nvalidates FROM in Dockerfile\nblocks external registries at CI"]
 
-    DEFENDER["Microsoft Defender for Cloud\nScan profundo assíncrono no ACR\nAzure Policy: bloqueia pull se CVE ativo"]
+    DEFENDER["Microsoft Defender for Cloud\nDeep async scan on ACR\nAzure Policy: blocks pull if active CVE"]
 
-    KYVERNO["Kyverno\nverifyImages: valida assinatura cosign\nACR-only: bloqueia registries externos"]
+    KYVERNO["Kyverno\nverifyImages: validates cosign signature\nACR-only: blocks external registries"]
 
-    RH -->|"Renovate monitora\nabre PR no base-images"| BI
+    RH -->|"Renovate monitors\nopens PR on base-images"| BI
     BI -->|"CI push\ncosign sign"| ACRP
-    ACRP -->|"Renovate detecta nova tag\nabre PR nos repos de dev"| DEV
+    ACRP -->|"Renovate detects new tag\nopens PR on dev repos"| DEV
     DEV -->|"CI push\ncosign sign"| ACRF
-    ACRF -->|"GitHub Actions deploy\nfuturo: ArgoCD sync"| OCP
+    ACRF -->|"GitHub Actions deploy\nfuture: ArgoCD sync"| OCP
 
     HADOLINT -. "CI gate\nDockerfile" .-> BI
     HADOLINT -. "CI gate\nDockerfile" .-> DEV

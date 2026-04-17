@@ -287,6 +287,132 @@ jobs:
 
 > **Nota:** o limite de 30 dias no cluster é independente do limite de 60 dias de tags no ACR. O ACR guarda o histórico de tags para rollback. O cluster só deve ter a versão mais recente a correr.
 
+#### Como identificar o owner e comunicar ao time
+
+O audit semanal só é útil se, ao encontrar uma imagem stale, souber **quem notificar** e **como notificar**. O mecanismo de ownership é baseado em labels de namespace no OpenShift — cada namespace declara explicitamente o time responsável, o repo GitHub e o canal de Slack.
+
+**Passo 1 — Labels obrigatórias em cada namespace:**
+
+```yaml
+# oc apply -f namespace-payments.yml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payments
+  labels:
+    team: "payments"
+    github-repo: "org/payments-service"   # repo onde abrir Issues
+    slack-channel: "C0123ABCDEF"          # Slack channel ID do time
+    contact-email: "payments-lead@company.com"
+```
+
+Estes labels são a fonte de verdade de ownership. O Platform Team é responsável por garantir que todos os namespaces os têm antes de qualquer workload ser deployado. Namespaces sem labels não passam na validação do Kyverno (pode ser adicionada uma policy `require-namespace-labels`).
+
+**Passo 2 — Workflow de notificação automática:**
+
+Quando o audit detecta uma imagem stale, lê os labels do namespace e aciona a comunicação sem intervenção manual:
+
+```yaml
+# .github/workflows/cluster-image-audit.yml (secção de notificação)
+      - name: Notify owners of stale images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          while IFS=$'\t' read -r NS POD IMAGE DAYS; do
+            # Ler labels do namespace
+            GITHUB_REPO=$(oc get namespace "$NS" -o jsonpath='{.metadata.labels.github-repo}')
+            SLACK_CHANNEL=$(oc get namespace "$NS" -o jsonpath='{.metadata.labels.slack-channel}')
+            CONTACT=$(oc get namespace "$NS" -o jsonpath='{.metadata.labels.contact-email}')
+
+            ISSUE_TITLE="[Image Audit] Stale image in $NS — $IMAGE ($DAYS days)"
+            ISSUE_BODY="## Imagem desatualizada detectada
+
+**Namespace:** \`$NS\`
+**Pod:** \`$POD\`
+**Imagem:** \`$IMAGE\`
+**Dias em execução sem redeploy:** $DAYS dias
+
+### O que fazer
+
+1. Verifique se existe um PR do Renovate aberto no seu repo com atualização da imagem base
+2. Se sim: aprove e faça merge — o pipeline fará o redeploy automaticamente
+3. Se não: abra um PR atualizando o \`FROM\` do Dockerfile para a tag mais recente no ACR
+4. Confirme o redeploy no cluster em até **7 dias**
+
+### Política
+
+Imagens não podem correr por mais de **30 dias** sem redeploy (política de ciclo de vida).
+Após 14 dias sem resposta, o Platform Team pode forçar o redeploy.
+
+> Gerado automaticamente pelo cluster image audit — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+            # Abrir Issue no repo do time (evita duplicatas verificando Issues abertas)
+            EXISTING=$(gh issue list --repo "$GITHUB_REPO" \
+              --search "$NS $IMAGE in:title" --state open --json number -q '.[0].number')
+
+            if [ -z "$EXISTING" ]; then
+              gh issue create \
+                --repo "$GITHUB_REPO" \
+                --title "$ISSUE_TITLE" \
+                --body "$ISSUE_BODY" \
+                --label "image-audit,security"
+              echo "Issue aberta em $GITHUB_REPO"
+            else
+              echo "Issue #$EXISTING já existe em $GITHUB_REPO — ignorando"
+            fi
+
+            # Notificar no Slack
+            curl -s -X POST https://slack.com/api/chat.postMessage \
+              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"channel\": \"$SLACK_CHANNEL\",
+                \"text\": \":warning: *Image Audit* — \`$NS/$POD\` está a correr \`$IMAGE\` há *$DAYS dias* sem redeploy. Issue aberta em <https://github.com/$GITHUB_REPO|$GITHUB_REPO>. Prazo: 7 dias.\"
+              }"
+
+          done < stale-images.txt
+```
+
+**Passo 3 — Política de escalação:**
+
+| Dia | Acção automática | Responsável |
+|---|---|---|
+| Dia 1 | GitHub Issue aberta + mensagem no Slack do time | Workflow automático |
+| Dia 7 | Comentário na Issue + nova mensagem Slack com menção ao lead | Workflow automático |
+| Dia 14 | Escalada para o canal do Platform Team + email ao `contact-email` | Workflow automático |
+| Dia 30 | Platform Team força `kubectl rollout restart` no namespace | Platform Team |
+
+```yaml
+# Escalação no dia 14 — step adicional no workflow
+      - name: Escalate overdue issues (14+ days open)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          CUTOFF_DATE=$(date -d "-14 days" +%Y-%m-%dT%H:%M:%SZ)
+
+          gh issue list --repo "org/payments-service" \
+            --label "image-audit" --state open \
+            --json number,title,createdAt \
+            --jq ".[] | select(.createdAt < \"$CUTOFF_DATE\") | .number" \
+          | while read -r ISSUE_NUM; do
+              gh issue comment "org/payments-service" --issue "$ISSUE_NUM" \
+                --body "⚠️ **14 dias sem resposta.** Escalando para o Platform Team. Redeploy forçado agendado para o dia 30."
+
+              # Notificar canal do Platform Team
+              curl -s -X POST https://slack.com/api/chat.postMessage \
+                -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{
+                  \"channel\": \"$PLATFORM_SLACK_CHANNEL\",
+                  \"text\": \":rotating_light: Issue #$ISSUE_NUM sem resposta há 14 dias — considerar redeploy forçado\"
+                }"
+            done
+```
+
+> **CODEOWNERS como fallback:** se o namespace não tiver o label `github-repo`, o workflow usa o arquivo `CODEOWNERS` do repositório base-images para identificar o time responsável pela imagem pai e notifica os revisores listados.
+
 #### Remediação — como funciona na prática
 
 **O que dispara:** Um CVE crítico é detectado pelo Defender for Cloud (scan async no ACR, contínuo) ou pelo trivy (gate no CI durante um novo build). Ambos produzem alertas com CVE ID, severidade, camada afetada e disponibilidade de fix.
